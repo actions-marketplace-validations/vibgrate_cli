@@ -21,7 +21,7 @@ Vibgrate answers one question for any repo:
 One command gives you a deterministic **Upgrade Drift Score** (0–100), a clear
 risk level, runtime + framework major-version lag, dependency age and EOL
 proximity, and a ranked list of what to fix next — across **Node.js/TypeScript,
-.NET, Python, and Java**.
+.NET, Python, Java and more**.
 
 ---
 
@@ -45,7 +45,7 @@ proximity, and a ranked list of what to fix next — across **Node.js/TypeScript
 No install, no signup:
 
 ```bash
-npx @vibgrate/cli scan .
+npx @vibgrate/cli scan
 ```
 
 You get an overall score + risk level, detected projects (Node/.NET/Python/Java),
@@ -56,7 +56,7 @@ Install it locally for repeat runs:
 
 ```bash
 npm install -D @vibgrate/cli
-npx vibgrate scan .
+npx vibgrate scan
 ```
 
 > Local binaries live in `node_modules/.bin`, so use `npx` (or an npm script)
@@ -75,7 +75,7 @@ scans to a workspace:
 
 ```bash
 VIBGRATE_DSN="vibgrate+https://<key_id>:<secret>@us.ingest.vibgrate.com/<workspace_id>" \
-  npx @vibgrate/cli scan . --push
+  npx @vibgrate/cli scan --push
 ```
 
 Upload is opt-in — nothing leaves your machine until you run `--push`. For CI,
@@ -125,7 +125,7 @@ Set up Vibgrate for upgrade drift tracking:
 1. Install: npm install -g @vibgrate/cli@latest
 2. Create DSN: npx vibgrate dsn create --workspace new
 3. Save DSN: echo 'export VIBGRATE_DSN="<dsn>"' >> ~/.zshrc && source ~/.zshrc
-4. Scan: npx vibgrate scan . --push
+4. Scan: npx vibgrate scan --push
 Then explain my drift score and top 3 upgrade priorities.
 ```
 
@@ -147,7 +147,7 @@ Copy-paste templates live in this package:
 - name: Vibgrate scan
   env:
     VIBGRATE_DSN: ${{ secrets.VIBGRATE_DSN }}
-  run: npx @vibgrate/cli scan . --push --format sarif --out vibgrate.sarif --fail-on error
+  run: npx @vibgrate/cli scan --push --format sarif --out vibgrate.sarif --fail-on error
 
 - name: Upload SARIF
   if: always()
@@ -160,7 +160,7 @@ Gate on drift budgets and regression relative to a baseline:
 
 ```bash
 npx vibgrate baseline .
-npx vibgrate scan . --baseline .vibgrate/baseline.json --drift-budget 40 --drift-worsening 5
+npx vibgrate scan --baseline .vibgrate/baseline.json --drift-budget 40 --drift-worsening 5
 ```
 
 - `--drift-budget <score>` fails the build if the absolute drift score exceeds your budget.
@@ -205,7 +205,7 @@ Full scanner details and configuration: **[DOCS.md](./DOCS.md)** ·
   `--no-local-artifacts` skips writing `.vibgrate/*.json` to disk.
 
 ```bash
-vibgrate scan . --offline --package-manifest ./package-versions.zip --max-privacy --format json --out scan.json
+vibgrate scan --offline --package-manifest ./package-versions.zip --max-privacy --format json --out scan.json
 ```
 
 Add `.vibgrate/` to your `.gitignore` — those are regenerated local outputs.
