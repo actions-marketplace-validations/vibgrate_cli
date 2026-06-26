@@ -41,6 +41,8 @@ export interface HostedOptions {
   region?: string;
   /** Explicit ingest URL override (host extracted), same as scans (wins over region). */
   ingest?: string;
+  /** Optional DSN identity — sends the `VibgrateDSN` header so the call gets the workspace tier. */
+  auth?: { keyId: string; secret: string };
   timeoutMs?: number;
   /** Injectable for tests; defaults to global fetch (undefined → disabled, returns null). */
   fetchImpl?: typeof fetch;
@@ -69,10 +71,16 @@ export async function fetchHostedDocs(req: HostedDocsRequest, opts: HostedOption
   const url = `${hostedBase(opts)}/v1/lib/docs`;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 4000);
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (opts.auth) {
+    // Identify the workspace for higher rate limits + tracking (same DSN auth as scan/push).
+    headers['Authorization'] = `VibgrateDSN ${opts.auth.keyId}:${opts.auth.secret}`;
+    headers['X-Vibgrate-Timestamp'] = String(Date.now());
+  }
   try {
     const res = await f(url, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers,
       body: JSON.stringify({
         name: req.name,
         targetId: req.targetId,
