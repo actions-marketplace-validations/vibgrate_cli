@@ -67,6 +67,27 @@ describe('fetchHostedDocs — fails closed to local', () => {
     }
   });
 
+  it('sends the DSN auth headers when an identity is provided', async () => {
+    let headers: Record<string, string> = {};
+    const f = (async (_url: string, init: { headers: Record<string, string> }) => {
+      headers = init.headers;
+      return { ok: true, status: 200, json: async () => ({ content: 'ok' }) };
+    }) as unknown as typeof fetch;
+    await fetchHostedDocs({ name: 'acme' }, { base: 'https://h.test', fetchImpl: f, auth: { keyId: 'k1', secret: 's1' } });
+    expect(headers['Authorization']).toBe('VibgrateDSN k1:s1');
+    expect(headers['X-Vibgrate-Timestamp']).toMatch(/^\d+$/);
+  });
+
+  it('omits auth headers when anonymous', async () => {
+    let headers: Record<string, string> = {};
+    const f = (async (_url: string, init: { headers: Record<string, string> }) => {
+      headers = init.headers;
+      return { ok: true, status: 200, json: async () => ({ content: 'ok' }) };
+    }) as unknown as typeof fetch;
+    await fetchHostedDocs({ name: 'acme' }, { base: 'https://h.test', fetchImpl: f });
+    expect(headers['Authorization']).toBeUndefined();
+  });
+
   it('sends the canonical §4 body (name/targetId/query/verbosity/max_tokens)', async () => {
     let captured: { url?: string; body?: unknown } = {};
     const f = (async (url: string, init: { body: string }) => {

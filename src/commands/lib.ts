@@ -14,6 +14,8 @@ import type { DriftNote } from '../engine/lib.js';
 import { selectForBudget, symbolsFromApi } from '../engine/select.js';
 import { assessDocQuality } from '../engine/quality.js';
 import { fetchHostedDocs, type HostedDocsResult } from '../engine/hosted.js';
+import { resolveDsn } from '../reporting/credentials.js';
+import { parseDsn } from '../reporting/commands/push.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { rootOf } from './util.js';
 import { CliError, ExitCode, usageError } from '../util/exit.js';
@@ -165,7 +167,13 @@ async function showCmd(root: string, name: string, budget: number | undefined, a
   // fetchHostedDocs fails closed to null, so the local path never breaks.
   let hosted: HostedDocsResult | null = null;
   if (online && !quality.sufficient) {
-    hosted = await fetchHostedDocs({ name: displayName, query: name, maxTokens: budget }, { region: opts.region, ingest: opts.ingest });
+    // Identify with the stored DSN (if any) so CLI users get the workspace tier; anon otherwise.
+    const dsn = resolveDsn();
+    const parsed = dsn ? parseDsn(dsn) : null;
+    hosted = await fetchHostedDocs(
+      { name: displayName, query: name, maxTokens: budget },
+      { region: opts.region, ingest: opts.ingest, auth: parsed ? { keyId: parsed.keyId, secret: parsed.secret } : undefined },
+    );
   }
 
   if (localDoc === undefined && !hosted) {
