@@ -2,7 +2,6 @@
 // scripts/vendor-core-open.mjs. Do not edit here — change the source package
 // and re-run the vendor script. Apache-2.0.
 import { Semaphore } from '../utils/semaphore.js';
-import { gt, SemVer } from 'semver';
 import { getManifestEntry, type PackageVersionManifest } from '../package-version-manifest.js';
 
 const ARTIFACT_HUB_API = 'https://artifacthub.io/api/v1';

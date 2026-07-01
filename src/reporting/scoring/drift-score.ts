@@ -1,5 +1,5 @@
 import * as crypto from 'node:crypto';
-import type { ProjectScan, DriftScore, Finding, ScanArtifact, RiskLevel, VibgrateConfig } from '../types.js';
+import type { ProjectScan, DriftScore, Finding, RiskLevel, VibgrateConfig } from '../types.js';
 
 /**
  * Version of the drift-score methodology (weighting + formula). Bump this ONLY
@@ -69,13 +69,11 @@ function dependencyScore(projects: ProjectScan[]): number | null {
   let totalCurrent = 0;
   let totalOne = 0;
   let totalTwo = 0;
-  let totalUnknown = 0;
 
   for (const p of projects) {
     totalCurrent += p.dependencyAgeBuckets.current;
     totalOne += p.dependencyAgeBuckets.oneBehind;
     totalTwo += p.dependencyAgeBuckets.twoPlusBehind;
-    totalUnknown += p.dependencyAgeBuckets.unknown;
   }
 
   const total = totalCurrent + totalOne + totalTwo;

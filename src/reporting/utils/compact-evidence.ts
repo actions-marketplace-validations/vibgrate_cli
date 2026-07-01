@@ -8,7 +8,7 @@
  * 4. Top-N sampling per category
  */
 
-import type { UiPurposeEvidenceItem, UiPurposeResult, CompactUiPurpose } from '../types.js';
+import type { UiPurposeResult, CompactUiPurpose } from '../types.js';
 
 /** Semantic category patterns for grouping evidence */
 const CATEGORY_PATTERNS: Array<{ category: string; pattern: RegExp }> = [

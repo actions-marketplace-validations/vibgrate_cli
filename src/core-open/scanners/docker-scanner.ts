@@ -2,8 +2,8 @@
 // scripts/vendor-core-open.mjs. Do not edit here — change the source package
 // and re-run the vendor script. Apache-2.0.
 import { fetchDockerVersionsBulk, parseDockerImage } from './docker-cache.js';
-import { gt, minVersion, SemVer } from 'semver';
-import type { ProjectScan, DependencyRow, DetectedFramework } from '../types.js';
+import { gt, SemVer } from 'semver';
+import type { ProjectScan, DependencyRow } from '../types.js';
 import { readTextFile, pathExists, FileCache } from '../utils/fs.js';
 import type { PackageVersionManifest } from '../package-version-manifest.js';
 import * as path from 'node:path';

@@ -3,7 +3,7 @@
 // and re-run the vendor script. Apache-2.0.
 import { fetchTerraformVersionsBulk } from './terraform-cache.js';
 import { gt, minVersion, validRange } from 'semver';
-import type { ProjectScan, DependencyRow, DetectedFramework } from '../types.js';
+import type { ProjectScan, DependencyRow } from '../types.js';
 import { readTextFile, pathExists, FileCache } from '../utils/fs.js';
 import type { PackageVersionManifest } from '../package-version-manifest.js';
 import * as path from 'node:path';
@@ -17,8 +17,6 @@ interface TerraformModule {
   source: string; // e.g., "terraform-aws-modules/vpc/aws"
   version?: string;
 }
-
-const TERRAFORM_MANIFEST_FILES = new Set(['.tf']); // Any .tf file
 
 /**
  * Parse Terraform files to extract provider and module requirements.

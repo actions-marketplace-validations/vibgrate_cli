@@ -2,7 +2,7 @@
 // scripts/vendor-core-open.mjs. Do not edit here — change the source package
 // and re-run the vendor script. Apache-2.0.
 import * as crypto from 'node:crypto';
-import type { ProjectScan, DriftScore, Finding, ScanArtifact, RiskLevel, VibgrateConfig } from '../types.js';
+import type { ProjectScan, DriftScore, Finding, RiskLevel, VibgrateConfig } from '../types.js';
 import { freshnessScoreFromLibyears } from './libyear.js';
 
 /**
@@ -73,13 +73,11 @@ function dependencyScore(projects: ProjectScan[]): number | null {
   let totalCurrent = 0;
   let totalOne = 0;
   let totalTwo = 0;
-  let totalUnknown = 0;
 
   for (const p of projects) {
     totalCurrent += p.dependencyAgeBuckets.current;
     totalOne += p.dependencyAgeBuckets.oneBehind;
     totalTwo += p.dependencyAgeBuckets.twoPlusBehind;
-    totalUnknown += p.dependencyAgeBuckets.unknown;
   }
 
   const total = totalCurrent + totalOne + totalTwo;
