@@ -3,6 +3,15 @@
 // and re-run the vendor script. Apache-2.0.
 import type { ScanArtifact } from '../types.js';
 
+/**
+ * Format a billable project-equivalent figure to at most 2 decimal places,
+ * trimming trailing zeros (0.20 → "0.2", 3.00 → "3", 0.24 → "0.24"). Sub-1
+ * fractions therefore never collapse to "0".
+ */
+function formatBillable(value: number): string {
+  return String(Number(value.toFixed(2)));
+}
+
 /** Generate a Markdown report from scan artifact */
 export function formatMarkdown(artifact: ScanArtifact): string {
   const lines: string[] = [];
@@ -19,11 +28,19 @@ export function formatMarkdown(artifact: ScanArtifact): string {
   lines.push(`| **Risk Level** | ${artifact.drift.riskLevel.toUpperCase()} |`);
   lines.push(`| **Projects** | ${artifact.projects.length} |`);
   if (billing) {
+    // Per-size billable contribution (count ÷ ratio) to 1–2 dp, so tiny projects
+    // don't read as free — a scan of 2 micro projects bills 0.2, not 0.
+    const contrib: string[] = [];
+    if (billing.standardCount > 0) contrib.push(`${formatBillable(billing.standardCount)} standard`);
+    if (billing.smallCount > 0) contrib.push(`${formatBillable(billing.smallCount / billing.smallBillingRatio)} small`);
+    if (billing.microCount > 0) contrib.push(`${formatBillable(billing.microCount / billing.microBillingRatio)} micro`);
+    if (billing.nanoCount > 0) contrib.push(`${formatBillable(billing.nanoCount / billing.nanoBillingRatio)} nano`);
+    const raw = formatBillable(billing.billableProjectsRaw);
     lines.push(
       `| **Classification** | ${billing.nanoCount} nano · ${billing.microCount} micro · ${billing.smallCount} small · ${billing.standardCount} standard |`,
     );
     lines.push(
-      `| **Billable Projects** | ${billing.billableProjects} (${billing.totalScanned} detected → ${billing.billableProjects} billable) |`,
+      `| **Billable Projects** | ${raw} (${billing.totalScanned} detected → ${raw} billable${contrib.length > 0 ? `; ${contrib.join(' · ')}` : ''}) |`,
     );
   }
   const scannedMeta: string[] = [artifact.timestamp];
