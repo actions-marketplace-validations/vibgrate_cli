@@ -1,10 +1,12 @@
 {
-  "name": "@vibgrate/cli",
+  "name": "@vibgrate/cli-public",
   "version": "2026.625.0",
   "description": "vg — local codebase intelligence CLI + MCP server for AI coding agents: deterministic code graph, drift reporting, and version-correct library docs (Apache-2.0)",
   "type": "module",
   "license": "Apache-2.0",
   "packageManager": "pnpm@9.0.0",
+  "//name": "Canonical source of truth for the public CLI — we develop it in the monorepo (see the root AGENTS.md). github.com/vibgrate/cli is a published replica whose accepted community PRs are synced back via .github/workflows/sync-public-cli.yml. It is `private` so it never publishes from here; the replica publishes to npm as `@vibgrate/cli` (see `_publishedAs`).",
+  "private": true,
   "author": "Vibgrate",
   "homepage": "https://vibgrate.com",
   "repository": {
@@ -17,6 +19,7 @@
   "publishConfig": {
     "access": "public"
   },
+  "_publishedAs": "@vibgrate/cli",
   "bin": {
     "vg": "dist/cli.js",
     "vibgrate": "dist/cli.js"
@@ -41,6 +44,8 @@
   "scripts": {
     "build": "pnpm run bundle:grammars && tsup",
     "bundle:grammars": "node scripts/bundle-grammars.mjs",
+    "demo:svg": "node scripts/gen-demo-svg.mjs",
+    "postinstall": "node scripts/postinstall.mjs",
     "dev": "tsx src/cli.ts",
     "lint": "eslint src",
     "typecheck": "tsc --noEmit",
@@ -72,20 +77,22 @@
     "graphology-traversal": "^0.3.1",
     "ignore": "^7.0.0",
     "semver": "^7.8.5",
+    "smol-toml": "^1.7.0",
     "tinypool": "^2.1.0",
     "tree-sitter-wasms": "^0.1.13",
     "typescript": "^6.0.0",
-    "web-tree-sitter": "0.25.10"
+    "web-tree-sitter": "0.25.10",
+    "yaml": "^2.6.1"
   },
   "optionalDependencies": {
     "fastembed": "^2.1.0"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^26.0.1",
     "@types/semver": "^7.5.0",
     "@typescript-eslint/eslint-plugin": "^8.61.0",
-    "@typescript-eslint/parser": "^8.61.1",
-    "eslint": "^10.5.0",
+    "@typescript-eslint/parser": "^8.62.0",
+    "eslint": "^10.6.0",
     "graphology-types": "^0.24.8",
     "tsup": "^8.0.0",
     "tsx": "^4.22.4",
