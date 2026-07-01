@@ -317,12 +317,6 @@ const RUBY_MANIFEST_FILES = new Set([
   'Gemfile',
 ]);
 
-const RUBY_EXTRA_FILES = new Set([
-  'Gemfile.lock',
-  'Rakefile',
-  'config.ru',
-]);
-
 /**
  * Check if a filename is a .gemspec file.
  */

@@ -111,7 +111,6 @@ async function parseMixExs(filePath: string, cache?: FileCache): Promise<{
   // {:dep, git: "https://github.com/user/repo.git", tag: "v1.0.0"}
   const gitDepsRegex = /\{\s*:(\w+)\s*,\s*git:\s*"[^"]+"/g;
   while ((match = gitDepsRegex.exec(content)) !== null) {
-    const name = match[1];
     // Skip git dependencies for version checking
   }
 

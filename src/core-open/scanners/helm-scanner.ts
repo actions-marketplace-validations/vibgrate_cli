@@ -3,7 +3,7 @@
 // and re-run the vendor script. Apache-2.0.
 import { fetchHelmVersionsBulk } from './helm-cache.js';
 import { gt, minVersion, validRange } from 'semver';
-import type { ProjectScan, DependencyRow, DetectedFramework } from '../types.js';
+import type { ProjectScan, DependencyRow } from '../types.js';
 import { readTextFile, pathExists, FileCache } from '../utils/fs.js';
 import type { PackageVersionManifest } from '../package-version-manifest.js';
 import * as path from 'node:path';
@@ -200,7 +200,7 @@ export async function scanHelm(
     return null;
   }
 
-  const { chartName, chartVersion, appVersion, dependencies } = await parseChartYaml(chartPath, cache);
+  const { chartName, appVersion, dependencies } = await parseChartYaml(chartPath, cache);
 
   // Read Chart.lock for exact versions
   const chartLockPath = `${projectPath}/Chart.lock`;

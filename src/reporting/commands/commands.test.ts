@@ -4,7 +4,6 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 // Since parseDsn and computeHmac are not exported, we test them via the module's behavior
 // or replicate the logic here for unit testing.
 
-import * as crypto from 'node:crypto';
 import { resolveIngestHost, createWorkspaceDsn } from './dsn.js';
 import { parseDsn, computeHmac } from './push.js';
 

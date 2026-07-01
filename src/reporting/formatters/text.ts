@@ -1,5 +1,5 @@
 import chalk from 'chalk';
-import type { ScanArtifact, ExtendedScanResults, InventoryItem, ServiceDependencyItem, LayerSummary, ArchitectureResult } from '../types.js';
+import type { ScanArtifact, ExtendedScanResults, InventoryItem, ServiceDependencyItem, ArchitectureResult } from '../types.js';
 import { VERSION } from '../version.js';
 import { driftBar } from '../../core-open/ui/bar.js';
 import { titleBox } from '../../core-open/ui/box.js';
@@ -662,7 +662,6 @@ function generatePriorityActions(artifact: ScanArtifact): PriorityAction[] {
     const dupes = artifact.extended.dependencyGraph.duplicatedPackages;
     const highImpactDupes = dupes.filter((d) => d.versions.length >= 3);
     if (highImpactDupes.length >= 3) {
-      const names = highImpactDupes.slice(0, 4).map((d) => `${d.name} (${d.versions.length}v)`).join(', ');
       let detail = `${highImpactDupes.length} packages have 3+ versions installed. Run \`npm dedupe\` to reduce bundle size and install time.`;
       const dupeLines: string[] = [];
       let shown = 0;

@@ -80,9 +80,6 @@ const KNOWN_RUST_FRAMEWORKS: Record<string, string> = {
   'ethers': 'ethers-rs',
 };
 
-/** Latest Rust version (as of 2026) */
-const LATEST_RUST = { major: 1, minor: 82 };
-
 interface RustDependency {
   name: string;
   version: string;

@@ -3,7 +3,7 @@
 // and re-run the vendor script. Apache-2.0.
 import * as path from 'node:path';
 import * as semver from 'semver';
-import { readTextFile, FileCache, readJsonFile } from '../utils/fs.js';
+import { readTextFile, FileCache } from '../utils/fs.js';
 import { withTimeout } from '../utils/timeout.js';
 import { PubCache } from './pub-cache.js';
 import type { ProjectScan, DependencyRow, DetectedFramework } from '../types.js';

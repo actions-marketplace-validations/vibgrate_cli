@@ -4,7 +4,7 @@ import chalk from 'chalk';
 import { pathExists, readJsonFile } from '../utils/fs.js';
 import { formatText } from '../formatters/text.js';
 import { formatMarkdown } from '../formatters/markdown.js';
-import type { ScanArtifact, ReportOptions } from '../types.js';
+import type { ScanArtifact } from '../types.js';
 
 export const reportCommand = new Command('report')
   .description('Generate a drift report from a scan artifact')
