@@ -6,6 +6,15 @@ import type { ScanArtifact, ExtendedScanResults, InventoryItem, ServiceDependenc
 import { driftBar } from '../ui/bar.js';
 import { titleBox } from '../ui/box.js';
 
+/**
+ * Format a billable project-equivalent figure to at most 2 decimal places,
+ * trimming trailing zeros (0.20 → "0.2", 1.50 → "1.5", 3.00 → "3", 0.24 → "0.24").
+ * Sub-1 fractions therefore never collapse to "0".
+ */
+function formatBillable(value: number): string {
+  return String(Number(value.toFixed(2)));
+}
+
 export function formatText(artifact: ScanArtifact): string {
   const lines: string[] = [];
 
@@ -134,17 +143,42 @@ export function formatText(artifact: ScanArtifact): string {
   // Billing is a commercial signal attached by the full scan; the open base scan omits it.
   const billing = artifact.billing;
   if (billing) {
+    // Show each size's billable *contribution* (count ÷ its ratio) to 1–2 dp, and
+    // the repository total to 1–2 dp — not the floored integer. A single scan can
+    // bill a fraction (e.g. 2 micro projects → 0.2); flooring it to "0" would
+    // wrongly read as free, when those fractions add up across repositories and
+    // are only rounded down after the whole estate is summed.
+    const parts: string[] = [];
+    if (billing.standardCount > 0)
+      parts.push(`${chalk.cyan(formatBillable(billing.standardCount))} standard`);
+    if (billing.smallCount > 0)
+      parts.push(`${chalk.cyan(formatBillable(billing.smallCount / billing.smallBillingRatio))} small`);
+    if (billing.microCount > 0)
+      parts.push(`${chalk.cyan(formatBillable(billing.microCount / billing.microBillingRatio))} micro`);
+    if (billing.nanoCount > 0)
+      parts.push(`${chalk.cyan(formatBillable(billing.nanoCount / billing.nanoBillingRatio))} nano`);
+
     lines.push(
       chalk.bold('  Classified:   ') +
         `${chalk.cyan(billing.nanoCount)} nano · ${chalk.cyan(billing.microCount)} micro · ${chalk.cyan(billing.smallCount)} small · ${chalk.cyan(billing.standardCount)} standard`,
     );
+    const raw = formatBillable(billing.billableProjectsRaw);
     lines.push(
       chalk.bold('  Billable:     ') +
-        chalk.bold.white(`${billing.billableProjects}`) +
+        chalk.bold.white(raw) +
         chalk.dim(
-          ` · ${billing.totalScanned} detected → ${billing.billableProjects} billable (micro-project pricing)`,
+          ` · ${billing.totalScanned} detected → ${raw} billable project${billing.billableProjectsRaw === 1 ? '' : 's'} (micro-project pricing)`,
         ),
     );
+    if (parts.length > 0) {
+      lines.push(chalk.dim('                ') + parts.join(chalk.dim(' · ')));
+    }
+    // When the total is fractional, make the "not free" point explicit.
+    if (billing.billableProjectsRaw !== Math.floor(billing.billableProjectsRaw)) {
+      lines.push(
+        chalk.dim('                These fractions add up across repositories, then round down to whole billable projects.'),
+      );
+    }
   }
 
   if (artifact.vcs) {

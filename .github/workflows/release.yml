@@ -18,6 +18,11 @@
 # The resolved version is stamped into package.json AND src/version.ts before the
 # build.
 #
+# After a successful (non-dry-run) publish on the push-to-main or manual path, the
+# resolved version is tagged as `v<version>` (e.g. v2026.701.3) and a GitHub Release
+# is cut for it. The tag is pushed with GITHUB_TOKEN, which does NOT start new
+# workflow runs, so it can't loop back through the v* trigger into another publish.
+#
 # Manual runs: Actions → Release → Run workflow. Use the "dry-run" option to
 # validate the build + npm pack without publishing.
 name: Release
@@ -36,7 +41,7 @@ on:
         type: boolean
 
 permissions:
-  contents: read
+  contents: write # push the v<version> tag + create the GitHub Release after publish
   id-token: write # required for npm provenance
 
 jobs:
@@ -149,3 +154,36 @@ jobs:
         run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # Tag the published version and cut a GitHub Release. Runs only after a real
+      # publish (not dry-run) and only on the push-to-main / manual-dispatch paths,
+      # not when this workflow was itself triggered by a v* tag (the tag already
+      # exists then). The tag is pushed with GITHUB_TOKEN, and GitHub does NOT start
+      # new workflow runs for GITHUB_TOKEN pushes — so despite the v* tag triggers on
+      # this workflow and docker.yml, creating v<version> here cannot loop back into
+      # another publish. Both the tag and the release are idempotent (skip if they
+      # already exist) so a manual re-run is safe.
+      - name: Tag release and create GitHub Release
+        if: github.ref_type != 'tag' && (github.event_name != 'workflow_dispatch' || inputs.dry-run == false)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null \
+            || git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "Tag \`${TAG}\` already exists — skipping tag creation." >> "$GITHUB_STEP_SUMMARY"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -a "${TAG}" -m "@vibgrate/cli ${VERSION}"
+            git push origin "${TAG}"
+            echo "Pushed tag \`${TAG}\`." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "GitHub Release \`${TAG}\` already exists — skipping." >> "$GITHUB_STEP_SUMMARY"
+          else
+            gh release create "${TAG}" --title "${TAG}" --generate-notes
+            echo "Created GitHub Release \`${TAG}\`." >> "$GITHUB_STEP_SUMMARY"
+          fi
