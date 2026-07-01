@@ -25,6 +25,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { stampPins } from './stamp-release-pins.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PKG_NAME = '@vibgrate/cli';
@@ -80,6 +81,10 @@ if (!has('--dry-run')) {
     throw new Error(`could not find VERSION export to stamp in ${verPath}`);
   }
   fs.writeFileSync(verPath, next);
+
+  // Keep the GitHub Action's default image-tag and the Helm chart's appVersion
+  // pinned to the same release, so every build carries a matching pin.
+  stampPins(version);
 }
 
 process.stdout.write(version);

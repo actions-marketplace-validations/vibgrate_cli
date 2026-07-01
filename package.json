@@ -1,6 +1,6 @@
 {
   "name": "@vibgrate/cli",
-  "version": "2026.625.0",
+  "version": "2026.701.4",
   "description": "vg — local codebase intelligence CLI + MCP server for AI coding agents: deterministic code graph, drift reporting, and version-correct library docs (Apache-2.0)",
   "type": "module",
   "license": "Apache-2.0",
@@ -41,6 +41,8 @@
   "scripts": {
     "build": "pnpm run bundle:grammars && tsup",
     "bundle:grammars": "node scripts/bundle-grammars.mjs",
+    "stamp:pins": "node scripts/stamp-release-pins.mjs",
+    "check:pins": "node scripts/stamp-release-pins.mjs --check",
     "demo:svg": "node scripts/gen-demo-svg.mjs",
     "postinstall": "node scripts/postinstall.mjs",
     "dev": "tsx src/cli.ts",

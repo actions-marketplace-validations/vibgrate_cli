@@ -281,6 +281,62 @@ jobs:
           gh attestation verify "oci://${IMAGE}@${{ needs.publish.outputs.digest }}" \
             --repo "${{ github.repository }}"
 
+  # Keep the version pins that render on public pages in sync with the image we
+  # just published: the GitHub Action's default `image-tag` (action.yml) and the
+  # Helm chart's `appVersion` (Chart.yaml). Both are served from COMMITTED files,
+  # so a build-time stamp alone never reaches them — we re-stamp to the published
+  # version and commit them back to main.
+  #
+  # Loop-safe: a push made with GITHUB_TOKEN does not itself trigger workflows,
+  # and the commit is marked [skip ci] as belt-and-suspenders. The change also
+  # can't slip past a release gate — it touches neither package.json `version`
+  # (Docker / Release gate) nor the chart `version` (Helm gate). If `main` is
+  # protected against direct pushes, the step warns instead of failing the
+  # release; CI's `check:pins` guard then catches the drift on the next PR.
+  pin-back:
+    name: Stamp version pins back to main
+    needs: [publish, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Stamp pins to published version
+        env:
+          VERSION: ${{ needs.publish.outputs.version }}
+        run: node scripts/stamp-release-pins.mjs --version "$VERSION"
+
+      - name: Commit & push if changed
+        env:
+          VERSION: ${{ needs.publish.outputs.version }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- action.yml charts/vibgrate/Chart.yaml; then
+            echo "Pins already at \`${VERSION}\` — nothing to commit." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add action.yml charts/vibgrate/Chart.yaml
+          git commit -m "chore(release): stamp v${VERSION} into Action image-tag & chart appVersion [skip ci]"
+          if git push origin HEAD:main; then
+            echo "Stamped \`action.yml\` + chart \`appVersion\` to \`${VERSION}\` on main." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::Could not push version pins to main (branch protection?). Run \`pnpm stamp:pins\` and open a PR to pin action.yml + Chart.yaml to ${VERSION}."
+            echo "> **Pins not pushed** — \`main\` may be protected. Run \`pnpm stamp:pins\` locally and open a PR." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   # Mirror the signed digest to Docker Hub ("shadows to docker"). Skipped
   # automatically when DOCKERHUB_USERNAME is not configured, so the pipeline works
   # before the mirror is set up. Mirror by DIGEST (preserves multi-arch), then
