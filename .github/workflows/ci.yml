@@ -40,6 +40,9 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Check version pins in sync
+        run: pnpm check:pins
+
       - name: Typecheck
         run: pnpm typecheck
 
