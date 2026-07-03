@@ -13,26 +13,74 @@ import { compileGlobs } from './glob.js';
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * Directories pruned entirely from the walk — third-party dependency trees,
+ * build/output directories, and VCS/IDE metadata. Skipping them keeps their
+ * contents out of BOTH project discovery (no phantom projects) AND the billing
+ * source-size signals. Matched by exact directory name at any depth.
+ *
+ * Correctness is load-bearing for pricing: a *missing* entry lets vendored
+ * third-party code inflate the project count and size (over-billing — e.g. a
+ * React Native app's `Pods/` minting hundreds of phantom C/Obj-C projects),
+ * while a *wrong* entry silently drops real source (under-billing). Every name
+ * here must be one that is effectively never hand-written source in its
+ * ecosystem. Keep in sync with `docs/DEPENDENCY-EXCLUSIONS.md`.
+ */
 const SKIP_DIRS = new Set([
-  'node_modules',
-  // Vendored third-party dependency trees (Go vendor/, PHP composer,
-  // Rails vendor/) — their manifests are not the repo's own projects and
-  // their runtimes/dependencies must not produce drift findings.
-  'vendor',
-  '.git',
-  '.vibgrate',
-  '.wrangler',
-  '.next',
-  'dist',
-  'build',
-  'out',
-  '.turbo',
-  '.cache',
-  'coverage',
-  'bin',
-  'obj',
-  '.vs',
-  'TestResults',
+  // ── Version control, IDE & tool metadata (never billable source) ──
+  '.git', '.svn', '.hg',
+  '.idea', '.vscode', '.vs',
+  '.vibgrate', '.wrangler', '.turbo', '.cache',
+
+  // ── JavaScript / Node — installed dependency trees ──
+  'node_modules',       // npm / pnpm / yarn classic
+  'bower_components',   // Bower (legacy)
+  'jspm_packages',      // jspm (legacy)
+  'web_modules',        // Snowpack (legacy)
+  '.pnpm-store',        // pnpm content-addressable store
+  '.yarn',              // Yarn Berry cache / unplugged / releases
+
+  // ── JS/TS meta-framework & bundler build output ──
+  '.next', '.nuxt', '.output', '.svelte-kit', '.astro',
+  '.vercel', '.netlify', '.angular', '.parcel-cache', '.docusaurus',
+  'storybook-static',
+
+  // ── Generic build / dist / coverage output ──
+  'dist', 'build', 'out', 'coverage',
+
+  // ── Vendored third-party source trees ──
+  'vendor',             // Go vendor/, PHP Composer, Rails vendor/bundle
+  'Pods',               // CocoaPods (iOS/macOS)
+  'Carthage',           // Carthage (iOS/macOS)
+
+  // ── Python — virtualenvs & tool caches ──
+  '.venv', 'venv', 'virtualenv', '.tox', '.nox',
+  '__pycache__', '.mypy_cache', '.pytest_cache', '.ruff_cache',
+  '.eggs', '.ipynb_checkpoints',
+
+  // ── Ruby ──
+  '.bundle',            // bundler config / vendored gems
+
+  // ── Rust / Maven / sbt / Clojure — all build into target/ ──
+  'target',
+
+  // ── JVM (Gradle / Maven) & .NET build output ──
+  '.gradle', 'bin', 'obj', 'TestResults',
+
+  // ── Swift / Xcode ──
+  '.build', '.swiftpm', 'DerivedData',
+
+  // ── Dart / Flutter ──
+  '.dart_tool',
+
+  // ── Elixir / Erlang ──
+  '_build', 'deps',
+
+  // ── Haskell (Cabal / Stack) ──
+  'dist-newstyle', '.stack-work',
+
+  // ── Infrastructure-as-code build/state ──
+  '.terraform', '.serverless', 'cdk.out', '.aws-sam',
 ]);
 
 /** File extensions skipped during the walk — binary/font/media that no scanner needs to read */
@@ -54,31 +102,70 @@ const SKIP_EXTENSIONS = new Set([
   '.map',
 ]);
 
-const EXTRA_SKIP_DIRS = new Set(['.nuxt', '.output', '.svelte-kit']);
+// Folded into SKIP_DIRS above (single source of truth). Kept as an empty set
+// so the existing walk/ripgrep call sites that OR-check it stay valid.
+const EXTRA_SKIP_DIRS = new Set<string>([]);
 
 /**
  * Lockfiles and generated dependency manifests excluded from the billing
- * source-size metrics. They are not source code and a single one (e.g. a
- * pnpm-lock.yaml) can exceed 1 MB on its own, which would otherwise inflate a
- * genuinely tiny project past the micro/small size thresholds. Compared
- * case-insensitively against the file basename.
+ * source-size metrics. They are not hand-written source, and a single one
+ * (e.g. a pnpm-lock.yaml) can exceed 1 MB on its own, which would otherwise
+ * inflate a genuinely tiny project past the micro/small size thresholds.
+ *
+ * Unlike {@link SKIP_DIRS}, these files legitimately sit at a project root
+ * (next to the manifest that declares the project), so they are filtered
+ * per-file rather than by pruning a directory. Manifests that *define* a
+ * project (package.json, go.mod, Cargo.toml, *.csproj, …) are deliberately NOT
+ * here — they are the source of truth for project discovery. Compared
+ * case-insensitively against the basename, so every entry must be lowercase.
+ * Keep in sync with `docs/DEPENDENCY-EXCLUSIONS.md`.
  */
 const SOURCE_EXCLUDE_FILES = new Set([
-  'pnpm-lock.yaml',
-  'package-lock.json',
-  'npm-shrinkwrap.json',
-  'yarn.lock',
-  'bun.lockb',
-  'bun.lock',
+  // JavaScript / Node
+  'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock',
+  'pnpm-lock.yaml', 'bun.lockb', 'bun.lock', 'deno.lock',
+  '.pnp.cjs', '.pnp.data.json',            // Yarn PnP (generated, can be large)
+  // Python
+  'poetry.lock', 'pipfile.lock', 'pdm.lock', 'uv.lock',
+  'pylock.toml',                           // PEP 751 standard lock
+  'conda-lock.yml',
+  // Ruby
   'gemfile.lock',
-  'poetry.lock',
-  'pipfile.lock',
+  // PHP
   'composer.lock',
+  // Rust
   'cargo.lock',
+  // Go
+  'go.sum', 'go.work.sum', 'gopkg.lock', 'glide.lock',
+  // .NET
   'packages.lock.json',
-  'go.sum',
+  // Java / JVM (Gradle)
   'gradle.lockfile',
-  'deno.lock',
+  // Swift / Xcode
+  'package.resolved',
+  // Dart / Flutter
+  'pubspec.lock',
+  // Elixir
+  'mix.lock',
+  // Haskell (Cabal / Stack)
+  'cabal.project.freeze', 'stack.yaml.lock',
+  // Julia
+  'manifest.toml',
+  // R
+  'renv.lock',
+  // Perl (Carton)
+  'cpanfile.snapshot',
+  // CocoaPods / Carthage
+  'podfile.lock', 'cartfile.resolved',
+  // Terraform / IaC
+  '.terraform.lock.hcl',
+  // Helm
+  'chart.lock',
+  // C / C++ (Conan)
+  'conan.lock',
+  // Bazel
+  'module.bazel.lock',
+  // Nix
   'flake.lock',
 ]);
 

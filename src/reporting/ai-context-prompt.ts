@@ -1,6 +1,7 @@
 import * as path from 'node:path';
 import chalk from 'chalk';
 import { pathExists } from '../core-open/index.js';
+import { resolveCliInvocation } from '../util/cli-invocation.js';
 
 // Map of AI assistant config file/dir patterns to the `vg install <name>` argument.
 // Checked in priority order — first match wins.
@@ -28,7 +29,12 @@ export async function detectAiAssistant(rootDir: string): Promise<string | null>
 export function printAiContextPrompt(detectedAssistant: string | null): void {
   const teal = chalk.hex('#3FB0A4');
   const mint = chalk.hex('#4FE3C1');
-  const installCmd = detectedAssistant ? `vg install ${detectedAssistant}` : 'vg install --all';
+  // Prefix with whatever actually runs this CLI for the user: `vg` when it's
+  // installed on PATH, or `npx @vibgrate/cli` when they ran via npx (where a
+  // bare `vg install` would not resolve).
+  const cli = resolveCliInvocation();
+  const installArgs = detectedAssistant ? `install ${detectedAssistant}` : 'install --all';
+  const installCmd = `${cli} ${installArgs}`;
   const detectedNote = detectedAssistant
     ? chalk.dim(`  (${detectedAssistant} config detected)`)
     : '';

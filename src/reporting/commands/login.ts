@@ -5,6 +5,8 @@ import { resolveIngestHost, createWorkspaceDsn } from './dsn.js';
 import { writeStoredCredentials, credentialsPath, gitignoreEntryForCredentials } from '../credentials.js';
 import type { StoredCredentials } from '../credentials.js';
 import { findGitRoot, ensureGitignored } from '../utils/gitignore.js';
+import { resolveCliInvocation } from '../../util/cli-invocation.js';
+import * as path from 'node:path';
 import { openUrl } from '../utils/open-url.js';
 
 interface StartResponse {
@@ -33,12 +35,22 @@ interface TokenResponse {
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** True when `file` resolves to a path inside the `dir` tree. */
+function isInside(dir: string, file: string): boolean {
+  const rel = path.relative(dir, file);
+  return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
 export const loginCommand = new Command('login')
   .description('Authenticate the CLI with your Vibgrate workspace via the browser')
   .option('--ingest <url>', 'Ingest API URL (overrides --region)')
   .option('--region <region>', `Data residency region (${availableRegionIds().join(', ')})`, 'us')
   .option('--no-browser', 'Do not attempt to open a browser automatically')
-  .action(async (opts: { ingest?: string; region: string; browser: boolean }) => {
+  .option(
+    '--local',
+    'Store credentials in this project (.vibgrate/credentials.json) instead of ~/.vibgrate',
+  )
+  .action(async (opts: { ingest?: string; region: string; browser: boolean; local?: boolean }) => {
     let ingestHost: string;
     try {
       ingestHost = resolveIngestHost(opts.region, opts.ingest);
@@ -146,23 +158,26 @@ export const loginCommand = new Command('login')
           }
         }
 
-        writeStoredCredentials(creds);
+        const storeOpts = { local: opts.local === true };
+        writeStoredCredentials(creds, storeOpts);
+        const credsFile = credentialsPath(storeOpts);
         console.log('');
         console.log(chalk.green('✔') + ' Logged in.');
         if (creds.workspaceId) {
           console.log('  Workspace: ' + chalk.bold(creds.workspaceId));
         }
-        console.log(chalk.dim(`  Credentials saved to ${credentialsPath()}`));
+        console.log(chalk.dim(`  Credentials saved to ${credsFile}`));
 
         // Defense in depth (GUARDRAILS §1.1): the DSN we just stored is a
-        // credential and must never be committed. When run inside a git repo,
-        // make sure the credentials file is git-ignored, creating .gitignore if
-        // the repo doesn't have one. This is best-effort — never fail an
+        // credential and must never be committed. Only touch .gitignore when the
+        // credentials file actually lives inside the repo (the project-local
+        // store) — a home-directory store is already outside version control, so
+        // there is nothing to ignore. This is best-effort: never fail an
         // otherwise-successful login over .gitignore housekeeping.
         try {
           const root = findGitRoot();
-          if (root) {
-            const res = ensureGitignored(gitignoreEntryForCredentials(root), root);
+          if (root && isInside(root, credsFile)) {
+            const res = ensureGitignored(gitignoreEntryForCredentials(root, credsFile), root);
             if (res.status === 'created') {
               console.log(chalk.dim(`  Created .gitignore and ignored ${res.entry}`));
             } else if (res.status === 'added') {
@@ -173,7 +188,7 @@ export const loginCommand = new Command('login')
           /* non-fatal */
         }
 
-        console.log(chalk.dim('  You can now run "vibgrate scan --push".'));
+        console.log(chalk.dim(`  You can now run "${resolveCliInvocation()} scan --push".`));
         return;
       }
 

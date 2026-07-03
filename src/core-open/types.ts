@@ -690,6 +690,10 @@ export interface ScanOptions {
    *  panel) from the text report. The scan results themselves are unaffected.
    *  Used by non-interactive consumers such as the web-simulator recorder. */
   quiet?: boolean;
+  /** Command prefix to use in "next step" hints (e.g. the upsell panel's
+   *  `login → push`). `vg` when installed on PATH, `npx @vibgrate/cli` when the
+   *  user ran via npx. Defaults to `vg` when unset. */
+  invocation?: string;
   /**
    * Optional post-scoring step run inside the scan's progress bar, after findings
    * (e.g. building the local code map). Receives a progress reporter

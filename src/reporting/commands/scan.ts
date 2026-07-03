@@ -26,6 +26,31 @@ import { buildGraph } from '../../engine/build.js';
 import { writeArtifacts } from '../../engine/artifacts.js';
 import { writeSnapshot } from '../../engine/freshness.js';
 import { detectAiAssistant, printAiContextPrompt } from '../ai-context-prompt.js';
+import { resolveCliInvocation } from '../../util/cli-invocation.js';
+
+/**
+ * Whether `scan` should build the local code map after scoring drift.
+ *
+ * The code map is a *local artifact* — it writes `.vibgrate/graph.json`, the
+ * graph report/html, and a freshness snapshot, and building it runs the
+ * memory-heavy in-process TypeScript program. It is therefore skipped whenever
+ * the caller has opted out of local artifacts:
+ *
+ * - `--no-graph`  (`opts.graph === false`) — explicit opt-out.
+ * - `--max-privacy` — strongest privacy mode, which means "no local artifacts".
+ * - `--no-local-artifacts` — "Do not write .vibgrate JSON artifacts to disk";
+ *   graph.json is one of those artifacts, so building it violated the flag's
+ *   contract *and* let the optional map build OOM-kill baseline scans (e.g. the
+ *   migration `scan --push --no-local-artifacts` path), taking `--push` down
+ *   with it even though drift and findings were already computed.
+ */
+export function shouldBuildCodeMap(opts: {
+  graph?: boolean;
+  maxPrivacy?: boolean;
+  noLocalArtifacts?: boolean;
+}): boolean {
+  return opts.graph !== false && !opts.maxPrivacy && !opts.noLocalArtifacts;
+}
 
 /** Auto-push scan artifact to Vibgrate API */
 async function autoPush(
@@ -220,7 +245,10 @@ export const scanCommand = new Command('scan')
     region?: string;
     strict?: boolean;
     uiPurpose?: boolean;
-    noLocalArtifacts?: boolean;
+    // Commander maps the `--no-local-artifacts` negation flag to
+    // `localArtifacts` (default `true`, `false` when the flag is passed) — NOT
+    // to `noLocalArtifacts`. Reading the wrong name silently ignored the flag.
+    localArtifacts?: boolean;
     maxPrivacy?: boolean;
     offline?: boolean;
     full?: boolean;
@@ -242,6 +270,13 @@ export const scanCommand = new Command('scan')
 
     const hasDsn = !!resolveDsn(opts.dsn);
     const willPush = !opts.offline && (opts.push || hasDsn);
+
+    // `--no-local-artifacts` arrives from commander as `localArtifacts === false`
+    // (the negation flag's camelCase key), so normalise it once here. Reading
+    // `opts.noLocalArtifacts` (which never exists) had silently ignored the flag:
+    // every .vibgrate artifact — including the memory-heavy code map — was still
+    // written, which OOM-killed migration baseline scans mid-map.
+    const noLocalArtifacts = opts.localArtifacts === false;
 
     // Capture first-run before the scan writes .vibgrate/scan_result.json.
     const isFirstRun = !(await pathExists(path.join(rootDir, '.vibgrate', 'scan_result.json')));
@@ -352,7 +387,7 @@ export const scanCommand = new Command('scan')
       region: opts.region ?? pinnedRegion,
       strict: opts.strict,
       uiPurpose: opts.uiPurpose,
-      noLocalArtifacts: opts.noLocalArtifacts,
+      noLocalArtifacts,
       maxPrivacy: opts.maxPrivacy,
       offline: opts.offline,
       // `--full` is the comprehensive umbrella: it turns on vulnerability scanning.
@@ -364,14 +399,20 @@ export const scanCommand = new Command('scan')
       repositoryName: opts.repositoryName?.trim() || undefined,
       force: opts.force,
       quiet: opts.quiet,
+      // Prefix for the upsell panel's `login → push` hint — `vg` when installed,
+      // `npx @vibgrate/cli` when the user ran via npx (where bare `vg` fails).
+      invocation: resolveCliInvocation(),
     };
 
     // `scan` also builds the local code map (the AI/docs index) so one command
     // yields both the Drift Score and a ready graph for `vg ask`/`guide`/`lib`
     // and MCP. We run it as the scan's final `postScan` step so it shares the
     // *single* progress bar (no second bar/logo). Fail-soft — a map problem
-    // never fails the scan. Skipped under --no-graph or --max-privacy.
-    const wantGraph = opts.graph !== false && !opts.maxPrivacy;
+    // never fails the scan. Skipped under --no-graph, --max-privacy, and
+    // --no-local-artifacts (the map is a local .vibgrate artifact; see
+    // shouldBuildCodeMap). An uncatchable OOM in the map build otherwise takes
+    // the whole scan — and its --push — down with it.
+    const wantGraph = shouldBuildCodeMap({ graph: opts.graph, maxPrivacy: opts.maxPrivacy, noLocalArtifacts });
     if (wantGraph) {
       scanOpts.postScan = async (report) => {
         const result = await buildGraph({
@@ -456,7 +497,7 @@ export const scanCommand = new Command('scan')
       !opts.quiet &&
       !hasDsn &&
       !opts.offline &&
-      !opts.noLocalArtifacts &&
+      !noLocalArtifacts &&
       !opts.maxPrivacy &&
       isFirstRun;
 

@@ -1,8 +1,8 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { execFileSync } from 'node:child_process';
 import { skillMarkdown, nudgeMarkdown, mcpServerEntry, NUDGE_BEGIN, NUDGE_END, type ServeLaunch } from './content.js';
 import { CliError, ExitCode } from '../util/exit.js';
+import { whichOnPath, isOwnBinary } from '../util/cli-invocation.js';
 
 /**
  * Per-assistant install registry (a focused subset of VG-ASSISTANT-INSTALL §2;
@@ -130,38 +130,6 @@ export function detectServeLaunch(which: (cmd: string) => string | null = whichO
     args: ['-y', '-p', '@vibgrate/cli', 'vg', 'serve'],
     note: 'vg is not installed on PATH — registered an npx launcher. Install globally (`npm i -g @vibgrate/cli`) and rerun `vg install` for a faster startup.',
   };
-}
-
-function whichOnPath(cmd: string): string | null {
-  try {
-    const out = execFileSync(process.platform === 'win32' ? 'where' : 'which', [cmd], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    })
-      .trim()
-      .split(/\r?\n/)[0];
-    return out || null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Does this PATH entry launch *this* package? Symlink installs resolve into a
- * `…/@vibgrate/cli/…` directory; script shims (pnpm/bun/yarn, Windows .cmd)
- * reference the package path in their first bytes. Best-effort: unreadable or
- * unrecognisable entries count as foreign, which only makes us pick a safer
- * fallback.
- */
-function isOwnBinary(binPath: string): boolean {
-  try {
-    const real = fs.realpathSync(binPath);
-    if (/[\\/]@vibgrate[\\/]cli[\\/]/.test(real)) return true;
-    const head = fs.readFileSync(real, { encoding: 'utf8' }).slice(0, 2048);
-    return head.includes('@vibgrate/cli') || head.includes('vibgrate');
-  } catch {
-    return false;
-  }
 }
 
 export function installAssistant(a: Assistant, opts: InstallOptions): InstallAction {

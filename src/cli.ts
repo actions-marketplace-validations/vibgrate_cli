@@ -5,6 +5,7 @@ import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { Command, CommanderError } from 'commander';
 import { VERSION } from './version.js';
+import { resolveCliInvocation, NPX_INVOCATION } from './util/cli-invocation.js';
 import { registerBuild, runBuild } from './commands/build.js';
 import { registerStatus } from './commands/status.js';
 import { registerVerify } from './commands/verify.js';
@@ -101,13 +102,23 @@ export function buildProgram(): Command {
     )
     .version(VERSION, '--version', 'output the version number')
     .showSuggestionAfterError(true)
-    .addHelpText(
-      'after',
-      '\nRun `vg` to scan + map the current folder, `vg "<question>"` to ask, ' +
-        '`vg status`/`vg verify` for state.\n' +
-        'Drift: `vg scan` / `vg report`. Wire into your AI agent: `vg install`.\n' +
-        'The `vibgrate` command is an alias for `vg`.\nDocs: https://vibgrate.com/help',
-    );
+    .addHelpText('after', () => {
+      // Show commands with the prefix that actually runs this CLI for the reader:
+      // `vg` when installed, `npx @vibgrate/cli` when they invoked it via npx.
+      const cli = resolveCliInvocation();
+      const aliasNote =
+        cli === 'vg'
+          ? 'The `vibgrate` command is an alias for `vg`.\n'
+          : cli === NPX_INVOCATION
+            ? 'Install globally (`npm i -g @vibgrate/cli`) to use the shorter `vg` command.\n'
+            : '';
+      return (
+        `\nRun \`${cli}\` to scan + map the current folder, \`${cli} "<question>"\` to ask, ` +
+        `\`${cli} status\`/\`${cli} verify\` for state.\n` +
+        `Drift: \`${cli} scan\` / \`${cli} report\`. Wire into your AI agent: \`${cli} install\`.\n` +
+        `${aliasNote}Docs: https://vibgrate.com/help`
+      );
+    });
 
   // Global flags live on each subcommand (see cli-options.applyGlobalOptions),
   // so the dispatch can place the command token first and let flags follow.
