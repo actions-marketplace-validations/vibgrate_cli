@@ -22,6 +22,12 @@ export interface FormatTextOptions {
    * to false so callers that don't know the auth state never surface it.
    */
   free?: boolean;
+  /**
+   * Command prefix for the upsell panel's `login → push` hint. `vg` when the
+   * CLI is installed on PATH, `npx @vibgrate/cli` when the user ran via npx.
+   * Defaults to `vg`.
+   */
+  invocation?: string;
 }
 
 export function formatText(artifact: ScanArtifact, opts: FormatTextOptions = {}): string {
@@ -226,7 +232,7 @@ export function formatText(artifact: ScanArtifact, opts: FormatTextOptions = {})
   // Free-plan upsell: only when the user has no workspace DSN (they scanned
   // locally) and this scan produced a billing roll-up to price against.
   if (opts.free && artifact.billing) {
-    lines.push(...renderUpsellPanel(artifact.billing));
+    lines.push(...renderUpsellPanel(artifact.billing, opts.invocation ?? 'vg'));
     lines.push('');
   }
 
@@ -265,7 +271,7 @@ function formatMoney(value: number): string {
 }
 
 /** The teal call-out panel shown to free (no-DSN) users after a scan. */
-function renderUpsellPanel(billing: BillingSummary): string[] {
+function renderUpsellPanel(billing: BillingSummary, invocation: string): string[] {
   const raw = billing.billableProjectsRaw;
   const team = estimateMonthly(raw, PRICE_RATES.team);
   const business = estimateMonthly(raw, PRICE_RATES.business);
@@ -286,7 +292,7 @@ function renderUpsellPanel(billing: BillingSummary): string[] {
     `  ${chalk.cyan('•')} Alerts when drift crosses the budget you set`,
     ``,
     chalk.dim(`Free forever: 1 repository, 5 pushed scans / month.`),
-    `${chalk.bold('Start tracking:')}  ${chalk.cyan('vg login')}  →  ${chalk.cyan('vg push')}`,
+    `${chalk.bold('Start tracking:')}  ${chalk.cyan(`${invocation} login`)}  →  ${chalk.cyan(`${invocation} push`)}`,
   ];
 
   // Brand teal (#3FB0A4) border so the panel stands out from the cyan report boxes.

@@ -62,6 +62,23 @@ describe('free-plan upsell panel', () => {
     expect(text).toContain('vg push');
   });
 
+  it('defaults the login→push hint to `vg` when no invocation is given', () => {
+    const text = formatText(makeArtifact({ billing: makeBilling({ standard: 3 }) }), { free: true });
+    expect(text).toContain('vg login');
+    expect(text).toContain('vg push');
+  });
+
+  it('uses the npx invocation in the login→push hint when the user ran via npx', () => {
+    const text = formatText(makeArtifact({ billing: makeBilling({ standard: 3 }) }), {
+      free: true,
+      invocation: 'npx @vibgrate/cli',
+    });
+    expect(text).toContain('npx @vibgrate/cli login');
+    expect(text).toContain('npx @vibgrate/cli push');
+    // ...and not the bare `vg` form that would fail for an npx user.
+    expect(text).not.toContain('vg login');
+  });
+
   it('prices a fractional single-repo estate to the cent', () => {
     // 2 micro → 0.2 billable: Team 0.2×$6=$1.20, Business 0.2×$15=$3.
     const text = formatText(makeArtifact({ billing: makeBilling({ micro: 2 }) }), { free: true });

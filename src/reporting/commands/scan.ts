@@ -26,6 +26,31 @@ import { buildGraph } from '../../engine/build.js';
 import { writeArtifacts } from '../../engine/artifacts.js';
 import { writeSnapshot } from '../../engine/freshness.js';
 import { detectAiAssistant, printAiContextPrompt } from '../ai-context-prompt.js';
+import { resolveCliInvocation } from '../../util/cli-invocation.js';
+
+/**
+ * Whether `scan` should build the local code map after scoring drift.
+ *
+ * The code map is a *local artifact* — it writes `.vibgrate/graph.json`, the
+ * graph report/html, and a freshness snapshot, and building it runs the
+ * memory-heavy in-process TypeScript program. It is therefore skipped whenever
+ * the caller has opted out of local artifacts:
+ *
+ * - `--no-graph`  (`opts.graph === false`) — explicit opt-out.
+ * - `--max-privacy` — strongest privacy mode, which means "no local artifacts".
+ * - `--no-local-artifacts` — "Do not write .vibgrate JSON artifacts to disk";
+ *   graph.json is one of those artifacts, so building it violated the flag's
+ *   contract *and* let the optional map build OOM-kill baseline scans (e.g. the
+ *   migration `scan --push --no-local-artifacts` path), taking `--push` down
+ *   with it even though drift and findings were already computed.
+ */
+export function shouldBuildCodeMap(opts: {
+  graph?: boolean;
+  maxPrivacy?: boolean;
+  noLocalArtifacts?: boolean;
+}): boolean {
+  return opts.graph !== false && !opts.maxPrivacy && !opts.noLocalArtifacts;
+}
 
 /**
  * Whether `scan` should build the local code map after scoring drift.
@@ -398,6 +423,9 @@ export const scanCommand = new Command('scan')
       repositoryName: opts.repositoryName?.trim() || undefined,
       force: opts.force,
       quiet: opts.quiet,
+      // Prefix for the upsell panel's `login → push` hint — `vg` when installed,
+      // `npx @vibgrate/cli` when the user ran via npx (where bare `vg` fails).
+      invocation: resolveCliInvocation(),
     };
 
     // `scan` also builds the local code map (the AI/docs index) so one command
