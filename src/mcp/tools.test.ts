@@ -89,6 +89,27 @@ describe('orient (one-shot orientation)', () => {
     expect('context' in r).toBe(false);
   });
 
+  it('trims the concise summary to counts+languages; detailed keeps the top lists', async () => {
+    const g = makeGraph();
+    // Concise "find X" calls navigate by matches; the full topAreas/topHubs blocks
+    // were ~half the response tokens on the hot path (346→180 in the benchmark).
+    const concise = (await tool('orient').handler(g, { question: 'foo' }, ctx())) as Record<string, any>;
+    expect(Object.keys(concise.summary).sort()).toEqual(['counts', 'languages']);
+    const detailed = (await tool('orient').handler(g, { question: 'foo', response_format: 'detailed' }, ctx())) as Record<string, any>;
+    expect(detailed.summary).toHaveProperty('topAreas');
+    expect(detailed.summary).toHaveProperty('topHubs');
+  });
+
+  it('accepts `query` as an alias for `question` (sibling tools take `query`)', async () => {
+    const g = makeGraph();
+    // An agent that reaches for `query` (as search_symbols/resolve_library take)
+    // used to get a wasted "question is required" round-trip. Both keys now work.
+    const viaQuery = (await tool('orient').handler(g, { query: 'foo' }, ctx())) as Record<string, any>;
+    expect(viaQuery.matches.map((m: any) => m.name)).toContain('src/a.ts:foo');
+    const neither = (await tool('orient').handler(g, {}, ctx())) as Record<string, any>;
+    expect(neither.error).toBe('bad_request');
+  });
+
   it('treats scope "." / "./" as the whole repo, not a literal path filter', async () => {
     const g = makeGraph();
     // Files are repo-relative ("src/a.ts"); a literal startsWith(".") matched

@@ -3,11 +3,13 @@ import * as path from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { parseGraph } from '../engine/serialize.js';
 import { refreshIfStale } from '../engine/refresh.js';
 import { TOOLS, warmEmbedderInBackground } from './tools.js';
 import { renderToolResult } from './response.js';
-import { recordSaving, PER_FILE_TOKENS } from '../engine/savings.js';
+import { recordSaving, PER_FILE_TOKENS, SAVINGS_TOOLS, type Outcome } from '../engine/savings.js';
+import { countTokens } from '../engine/tokens.js';
 import { VERSION } from '../version.js';
 import type { VgGraph } from '../schema.js';
 
@@ -175,10 +177,10 @@ export function createServer(source: GraphSource, opts: ServeOptions = {}): Serv
     try {
       const args = (request.params.arguments ?? {}) as Record<string, unknown>;
       const result = await tool.handler(graph, args, { root, local, dedup, seen });
-      // Opt-in, counts-only savings ledger (no telemetry by default).
-      if (savings && (tool.name === 'query_graph' || tool.name === 'get_node')) {
-        maybeRecordSaving(root, tool.name, result);
-      }
+      // Opt-in, counts-only usage ledger (no telemetry by default): one entry per
+      // navigation call, with its outcome and — for the grep-baseline tools — the
+      // token counts the savings summary is built from.
+      if (savings) recordUsage(root, tool.name, result);
       // Compact → clamp to the token ceiling → compact-serialise. See ./response.ts.
       return renderToolResult(result);
     } catch (err) {
@@ -206,14 +208,95 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
-function maybeRecordSaving(root: string, tool: string, result: unknown): void {
-  if (!result || typeof result !== 'object') return;
-  const r = result as { tokensEstimate?: number; matches?: { file?: string }[] };
-  const vgTokens = typeof r.tokensEstimate === 'number' ? r.tokensEstimate : 0;
-  if (vgTokens <= 0) return;
-  const files = new Set((r.matches ?? []).map((m) => m.file).filter(Boolean));
-  const baselineTokens = files.size * PER_FILE_TOKENS;
-  recordSaving(root, { tool, vgTokens, baselineTokens }, Date.now());
+/**
+ * Append a counts-only usage entry for a navigation call: which tool, how it
+ * resolved (complete/partial/miss), and — for the grep-baseline tools — the
+ * tokens vg spent vs the grep/read baseline it replaced.
+ *
+ * `vgTokens` is the size of the payload vg ACTUALLY returned — the rendered text
+ * block the model receives and re-pays on every subsequent turn — measured with
+ * the same token counter the budget uses. It is deliberately NOT read from a
+ * `tokensEstimate` field: only query_graph's rarely-used *detailed* mode ever
+ * set that (get_node never did), so the old code recorded nothing under normal
+ * concise usage and `vg savings` always reported "recording is off".
+ */
+export function recordUsage(root: string, tool: string, result: unknown): void {
+  const outcome = classifyOutcome(result);
+  let vgTokens = 0;
+  let baselineTokens = 0;
+  // Token savings are only meaningful for the tools with a grep/read baseline;
+  // other tools still record their outcome for the per-command breakdown.
+  if (SAVINGS_TOOLS.has(tool) && result && typeof result === 'object') {
+    vgTokens = countTokens(renderedText(renderToolResult(result)));
+    // Grep/read baseline: ~PER_FILE_TOKENS per distinct file the answer points
+    // at — the files a grep/read agent would have had to open to learn the same
+    // thing. query_graph surfaces them as `matches[].file`; get_node as its own
+    // `file` plus the files of the callers/callees it returned in one call.
+    baselineTokens = referencedFiles(result).size * PER_FILE_TOKENS;
+  }
+  recordSaving(root, { tool, outcome, vgTokens, baselineTokens }, Date.now());
+}
+
+/**
+ * Bucket a tool result into complete / partial / miss. A `miss` is an answer
+ * that found nothing (no match, not-found, not-connected, or an empty listing);
+ * a `partial` found results but capped or paginated some of them; everything
+ * else is `complete`. Note that a legitimately empty `affected`/`covers` (e.g.
+ * "nothing depends on this") is a successful answer, not a miss — only the
+ * primary discovery signals below mark a miss.
+ */
+function classifyOutcome(result: unknown): Outcome {
+  if (Array.isArray(result)) return result.length === 0 ? 'miss' : 'complete';
+  if (!result || typeof result !== 'object') return 'miss';
+  const r = result as Record<string, unknown>;
+  if (typeof r.error === 'string' && r.error) return 'miss'; // not_found / ambiguous / unresolved
+  if (r.connected === false) return 'miss'; // find_path
+  if (Array.isArray(r.matches) && r.matches.length === 0) return 'miss'; // query_graph / search_symbols
+  return isPartial(r) ? 'partial' : 'complete';
+}
+
+/** True when a hit left results on the table: paginated, or a capped relation list. */
+function isPartial(r: Record<string, unknown>): boolean {
+  if (r.moreAvailable === true) return true;
+  if (r._truncated && typeof r._truncated === 'object') return true;
+  // A `<name>Total` greater than the length of its sibling `<name>` array means
+  // the array was capped (e.g. get_node's callsTotal vs the shown calls).
+  for (const [key, value] of Object.entries(r)) {
+    if (typeof value !== 'number' || !key.endsWith('Total')) continue;
+    const base = key.slice(0, -'Total'.length);
+    const shown = Array.isArray(r[base]) ? (r[base] as unknown[]).length : 0;
+    if (value > shown) return true;
+  }
+  return false;
+}
+
+/** The text block of a rendered tool result — what the model is billed for. */
+function renderedText(rendered: CallToolResult): string {
+  const block = rendered.content?.find((b) => b.type === 'text');
+  return block && 'text' in block && typeof block.text === 'string' ? block.text : '';
+}
+
+/** Distinct files a navigation result points at (its grep/read baseline set). */
+function referencedFiles(result: unknown): Set<string> {
+  const r = result as { file?: unknown; matches?: unknown; calls?: unknown; calledBy?: unknown };
+  const files = new Set<string>();
+  if (typeof r.file === 'string' && r.file) files.add(r.file);
+  for (const m of asArray(r.matches)) {
+    const f = (m as { file?: unknown }).file;
+    if (typeof f === 'string' && f) files.add(f);
+  }
+  // get_node's calls/calledBy are qualified names of the form `path:symbol`; the
+  // path prefix is the file a grep/read agent would open to inspect that edge.
+  for (const name of [...asArray(r.calls), ...asArray(r.calledBy)]) {
+    if (typeof name !== 'string') continue;
+    const i = name.indexOf(':');
+    if (i > 0) files.add(name.slice(0, i));
+  }
+  return files;
+}
+
+function asArray(v: unknown): unknown[] {
+  return Array.isArray(v) ? v : [];
 }
 
 function errorResult(message: string) {
