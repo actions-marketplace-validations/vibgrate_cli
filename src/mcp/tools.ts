@@ -191,17 +191,20 @@ export const TOOLS: VgTool[] = [
     name: 'orient',
     description:
       'Start here: one call returns the map overview, ranked matches for your question, and the top hit’s blast radius — replaces summary+query+impact round-trips.',
-    inputSchema: obj(
-      {
-        question: { type: 'string', maxLength: 300 },
-        scope: { type: 'string', description: 'path prefix to orient within' },
-        budget: { type: 'number', description: 'token budget in detailed mode (default 1500)' },
-        response_format: RESPONSE_FORMAT,
-      },
-      ['question'],
-    ),
+    // `query` is a no-description back-compat alias for `question`: the sibling
+    // discovery tools (search_symbols, resolve_library) take `query`, so an agent
+    // naturally reaches for it here too — accepting it turns what was a wasted
+    // "question is required" round-trip into a hit. Neither is `required` (either
+    // satisfies the in-handler check), matching library_docs/resolve_library.
+    inputSchema: obj({
+      question: { type: 'string', maxLength: 300 },
+      query: { type: 'string', maxLength: 300 },
+      scope: { type: 'string', description: 'path prefix to orient within' },
+      budget: { type: 'number', description: 'token budget in detailed mode (default 1500)' },
+      response_format: RESPONSE_FORMAT,
+    }),
     handler: async (graph, args, ctx) => {
-      const question = String(args.question ?? '');
+      const question = String(args.question ?? args.query ?? '');
       if (!question) return { error: 'bad_request', message: 'question is required' };
       const budget = numOr(args.budget, 1500);
       // Semantic when available, else lexical — and never throws (see retrieve).
@@ -227,7 +230,11 @@ export const TOOLS: VgTool[] = [
       }
       const shown = detailed ? scoped : scoped.slice(0, CONCISE_MATCHES);
       return {
-        summary: summarize(graph, detailed ? 10 : CONCISE_MATCHES),
+        // Concise "find X" calls need a one-line map (counts + languages), not the
+        // full topAreas/topHubs blocks — those were ~half of every orient
+        // response's tokens on the hot discovery path and the caller navigates by
+        // `matches`. Detailed keeps the full overview.
+        summary: detailed ? summarize(graph, 10) : conciseSummary(graph),
         mode,
         // The fact-annotated context block is detail: concise callers navigate
         // by the ranked matches and fetch nodes on demand (plan P2).
@@ -259,18 +266,19 @@ export const TOOLS: VgTool[] = [
   {
     name: 'query_graph',
     description: 'Find code by meaning when you don’t know the name: symptoms, relationships, what-breaks-if. For a known name or literal string use search_symbols.',
-    inputSchema: obj(
-      {
-        question: { type: 'string', maxLength: 300 },
-        limit: { type: 'number', description: 'ranked matches to return (default 5)' },
-        offset: { type: 'number' },
-        budget: { type: 'number', description: 'context-block token budget in detailed mode (default 2000)' },
-        response_format: RESPONSE_FORMAT,
-      },
-      ['question'],
-    ),
+    // `query` is a no-description back-compat alias for `question` (see orient):
+    // sibling tools take `query`, so accept it here rather than reject the call.
+    inputSchema: obj({
+      question: { type: 'string', maxLength: 300 },
+      query: { type: 'string', maxLength: 300 },
+      limit: { type: 'number', description: 'ranked matches to return (default 5)' },
+      offset: { type: 'number' },
+      budget: { type: 'number', description: 'context-block token budget in detailed mode (default 2000)' },
+      response_format: RESPONSE_FORMAT,
+    }),
     handler: async (graph, args, ctx) => {
-      const question = String(args.question ?? '');
+      const question = String(args.question ?? args.query ?? '');
+      if (!question) return { mode: 'lexical', matches: [], hint: 'question (or query) is required' };
       const budget = numOr(args.budget, 2000);
       // Semantic by default (local model, cached/offline after first use); falls
       // back to the deterministic lexical floor if the backend is unavailable or
@@ -806,6 +814,11 @@ export const TOOLS: VgTool[] = [
 
 /** Default token budgets by verbosity (canonical §4) when no explicit `max_tokens` is given. */
 const VERBOSITY_BUDGET = { concise: 1500, balanced: 4000, exhaustive: 12000 } as const;
+
+/** The lean one-line map for concise `orient`: counts + languages, no top lists. */
+function conciseSummary(graph: VgGraph) {
+  return { counts: graph.meta.counts, languages: graph.meta.languages };
+}
 
 /** Shared map overview used by both `get_graph_summary` and `orient`. */
 function summarize(graph: VgGraph, top = 10) {

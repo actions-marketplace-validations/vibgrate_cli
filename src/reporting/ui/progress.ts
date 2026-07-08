@@ -17,7 +17,7 @@ const ROBOT = [
 
 const BRAND = [
   chalk.bold.white('  vibgrate'),
-  chalk.dim(`  Drift Intelligence Engine`) + chalk.dim(` v${VERSION}`),
+  chalk.dim(`  Code Intelligence Engine`) + chalk.dim(` v${VERSION}`),
 ];
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];

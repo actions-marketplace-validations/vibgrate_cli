@@ -41,13 +41,14 @@ export function queryGraph(graph: VgGraph, question: string, options: QueryOptio
   const budget = options.budget ?? 2000;
   const limit = options.limit ?? 12;
   const terms = tokenize(question);
+  const weightOf = termWeights(graph, terms);
   const index = new GraphIndex(graph);
 
   const scored: QueryMatch[] = [];
   for (const node of graph.nodes) {
     if (node.kind === 'file' || node.kind === 'external') continue;
-    const { score, why } = scoreNode(node, terms);
-    if (score > 0) scored.push({ node, score: round(score * (1 + node.importance)), why });
+    const { score, why } = scoreNode(node, terms, weightOf);
+    if (score > 0) scored.push({ node, score: round(score * (1 + IMPORTANCE_WEIGHT * node.importance)), why });
   }
   scored.sort((a, b) => b.score - a.score || a.node.qualifiedName.localeCompare(b.node.qualifiedName));
 
@@ -78,6 +79,7 @@ export async function queryGraphSemantic(
   const budget = options.budget ?? 2000;
   const limit = options.limit ?? 12;
   const terms = tokenize(question);
+  const weightOf = termWeights(graph, terms);
   const index = new GraphIndex(graph);
   const queryVec = await options.embedder.embedQuery(question);
 
@@ -87,7 +89,7 @@ export async function queryGraphSemantic(
   const whyById = new Map<string, string>();
   for (const node of graph.nodes) {
     if (node.kind === 'file' || node.kind === 'external') continue;
-    const { score, why } = scoreNode(node, terms);
+    const { score, why } = scoreNode(node, terms, weightOf);
     lexRaw.set(node.id, score);
     whyById.set(node.id, why);
     if (score > lexMax) lexMax = score;
@@ -103,7 +105,7 @@ export async function queryGraphSemantic(
     if (hybrid <= 0) continue;
     const lexWhy = whyById.get(node.id);
     const why = lexWhy || (sem > 0.3 ? `semantic match (${sem.toFixed(2)})` : 'weak match');
-    scored.push({ node, score: round(hybrid * (1 + node.importance)), why });
+    scored.push({ node, score: round(hybrid * (1 + IMPORTANCE_WEIGHT * node.importance)), why });
   }
   scored.sort((a, b) => b.score - a.score || a.node.qualifiedName.localeCompare(b.node.qualifiedName));
 
@@ -123,7 +125,7 @@ function tokenize(q: string): string[] {
   ];
 }
 
-function scoreNode(node: GraphNode, terms: string[]): { score: number; why: string } {
+function scoreNode(node: GraphNode, terms: string[], weightOf: (t: string) => number = () => 1): { score: number; why: string } {
   let score = 0;
   const hits: string[] = [];
   const name = node.name.toLowerCase();
@@ -133,30 +135,76 @@ function scoreNode(node: GraphNode, terms: string[]): { score: number; why: stri
   // (splitting must see the capitals, so it happens before lowercasing).
   const nameParts = identifierParts(node.name);
   for (const t of terms) {
+    // Each term's contribution is weighted by its specificity (IDF over symbol
+    // names): a match on a distinctive term ("toComparable", "layoutFor") counts
+    // for more than a match on a term shared by hundreds of symbols ("code",
+    // "get", "run"). Without this, an incidental exact-name hit on a common word
+    // in a natural-language question outranked the conceptually-correct symbol,
+    // and importance weighting amplified the wrong hit (VG-NAVIGATION trace).
+    const w = weightOf(t);
     if (name === t) {
-      score += 10;
+      score += 10 * w;
       hits.push(t);
     } else if (nameParts.has(t)) {
-      score += 6;
+      score += 6 * w;
       hits.push(t);
     } else if (name.includes(t)) {
-      score += 4;
+      score += 4 * w;
       hits.push(t);
     } else if (qn.includes(t)) {
-      score += 3;
+      score += 3 * w;
       hits.push(t);
     } else if (fuzzyPartMatch(t, nameParts)) {
       // Morphological / subword match: "authentication" ↔ "authenticate"
       // (shared prefix), so lexical ask survives word-form differences without
       // a model. The semantic path handles non-shared-root synonyms.
-      score += 2;
+      score += 2 * w;
       hits.push(`~${t}`);
     } else if (file.includes(t)) {
-      score += 1;
+      score += 1 * w;
       hits.push(t);
     }
   }
   return { score, why: hits.length ? `matched: ${hits.join(', ')}` : '' };
+}
+
+/**
+ * Importance is a mild tiebreaker, not a doubling. The old `1 + importance`
+ * let a hub (importance→1) double its score and outrank a stronger textual
+ * match on the actual target; at 0.4 a top hub adds at most 40%, enough to
+ * break genuine ties without overriding term evidence.
+ */
+const IMPORTANCE_WEIGHT = 0.4;
+
+/**
+ * Per-term specificity weights (IDF) for one question, computed over the graph's
+ * symbol-name vocabulary: `ln((N+1)/(df+1)) + 1`, clamped to a sane band. A term
+ * that appears in one symbol name is highly discriminating; one that appears in
+ * hundreds ("get", "code", "run", "handler") is near-noise. Clamped so a term
+ * matching nothing (huge idf, but it scores 0 anyway) or everything can't
+ * distort the scale. Cost is one O(nodes) pass, dwarfed by the scoring loop.
+ */
+function termWeights(graph: VgGraph, terms: string[]): (t: string) => number {
+  if (terms.length === 0) return () => 1;
+  const df = new Map<string, number>();
+  let n = 0;
+  for (const node of graph.nodes) {
+    if (node.kind === 'file' || node.kind === 'external') continue;
+    n++;
+    const name = node.name.toLowerCase();
+    const parts = identifierParts(node.name);
+    for (const t of terms) {
+      if (parts.has(t) || name.includes(t)) df.set(t, (df.get(t) ?? 0) + 1);
+    }
+  }
+  const w = new Map<string, number>();
+  for (const t of terms) {
+    const idf = Math.log((n + 1) / ((df.get(t) ?? 0) + 1)) + 1;
+    // Ceiling of 8 (vs a natural df≈40 idf ≈ 5.4) keeps genuinely rare terms
+    // dominant while a term matching nothing/only a file path can't distort.
+    w.set(t, Math.max(0.5, Math.min(8, idf)));
+  }
+  return (t: string) => w.get(t) ?? 1;
 }
 
 /** camelCase / snake_case / kebab split of an identifier → lowercased parts. */

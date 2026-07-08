@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { findNodes } from './lookup.js';
-import type { VgGraph } from '../schema.js';
+import type { GraphNode, VgGraph } from '../schema.js';
 
 /**
  * `search_symbols` — the hybrid flashlight next to the map
@@ -51,7 +51,18 @@ export function searchSymbols(graph: VgGraph, root: string, query: string, limit
   if (!q) return { matches: [], moreAvailable: false, hint: 'query is required' };
 
   // Pass 1 — graph name index (already ranked by importance).
-  const nodes = findNodes(graph, q).filter((n) => n.kind !== 'file');
+  let nodes = findNodes(graph, q).filter((n) => n.kind !== 'file');
+  // Multi-word fallthrough: an agent that types a phrase ("NewScan modal
+  // component", "dsn install command") gets nothing from the whole-string name
+  // index and nothing from the whole-string literal scan — a dead end. When the
+  // exact query finds no symbol AND the query is multiple words, union the
+  // per-token matches and rank by how many distinct query tokens each symbol
+  // covers (then importance). Single-name lookups (the primary use) never reach
+  // this branch, so their behaviour is unchanged.
+  if (nodes.length === 0) {
+    const tokens = queryTokens(q);
+    if (tokens.length >= 2) nodes = multiTokenNodes(graph, tokens);
+  }
   const symbolHits: SymbolHit[] = nodes.slice(0, limit).map((n, i) => ({
     kind: n.kind,
     name: n.qualifiedName,
@@ -80,6 +91,32 @@ export function searchSymbols(graph: VgGraph, root: string, query: string, limit
     };
   }
   return { matches, moreAvailable: nodes.length > symbolHits.length || truncatedScan };
+}
+
+/** Meaningful query words for the multi-word fallthrough (drop tiny tokens). */
+function queryTokens(q: string): string[] {
+  return [...new Set(q.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length >= 2))];
+}
+
+/**
+ * Union of per-token name-index matches, ranked by how many distinct query
+ * tokens each symbol covers (then by importance). Reuses `findNodes` per token
+ * so the matching rules (exact/short/case-insensitive/substring) stay identical
+ * to a single-name lookup — this only broadens a phrase into its words.
+ */
+function multiTokenNodes(graph: VgGraph, tokens: string[]): GraphNode[] {
+  const cov = new Map<string, { node: GraphNode; hits: number }>();
+  for (const t of tokens) {
+    for (const n of findNodes(graph, t)) {
+      if (n.kind === 'file') continue;
+      const e = cov.get(n.id);
+      if (e) e.hits++;
+      else cov.set(n.id, { node: n, hits: 1 });
+    }
+  }
+  return [...cov.values()]
+    .sort((a, b) => b.hits - a.hits || b.node.importance - a.node.importance)
+    .map((e) => e.node);
 }
 
 /** Bounded literal scan; returns true when it stopped early (more may exist). */

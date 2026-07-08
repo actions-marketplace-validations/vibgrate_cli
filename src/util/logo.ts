@@ -37,7 +37,7 @@ export function logoLines(root?: string): string[] {
     `  ${ROBOT[1]}`,
     `  ${ROBOT[2]}`,
     `  ${ROBOT[3]}`,
-    `  ${c.bold.white('vibgrate')} ${teal('graph')}  ${c.dim(`· deterministic code graph · v${VERSION}`)}`,
+    `  ${c.bold.white('Vibgrate')} ${teal('Graph')}  ${c.dim(`· Code Intelligence Engine · v${VERSION}`)}`,
     ...(root ? [`  ${c.dim(root)}`] : []),
     '',
   ];

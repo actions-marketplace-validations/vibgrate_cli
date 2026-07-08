@@ -39,6 +39,34 @@ describe('queryGraph (ask)', () => {
   });
 });
 
+describe('queryGraph term specificity (IDF)', () => {
+  // A distinctive term must outweigh a common-word exact-name hit: the pathology
+  // where "run"/"copy"/"code" in a natural-language question hijacked the ranking.
+  let g: VgGraph;
+  let d: string;
+  beforeAll(async () => {
+    d = makeProject({
+      'src/runners.ts': [
+        'export function run() {}',
+        'export function runScan() {}',
+        'export function runBuild() {}',
+        'export function runDeploy() {}',
+        'export function runTest() {}',
+      ].join('\n'),
+      'src/util.ts': ['export function toComparable(x: number): number {', '  return x;', '}'].join('\n'),
+    });
+    g = (await buildGraph({ root: d, generatedAt: '2020-01-01T00:00:00.000Z', inline: true })).graph;
+  });
+  afterAll(() => cleanup(d));
+
+  it('ranks the rare-term match above a common-word exact-name match', () => {
+    // "run" is common (5 symbols); "comparable" is rare (1). The question is
+    // *about* comparable — run is incidental. toComparable must win.
+    const r = queryGraph(g, 'run the comparable value');
+    expect(r.matches[0].node.name).toBe('toComparable');
+  });
+});
+
 describe('lookup', () => {
   it('resolves by qualified name', () => {
     expect(findNodes(graph, 'OrderService.addItem')[0]?.name).toBe('addItem');

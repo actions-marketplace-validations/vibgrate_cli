@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { buildGraph } from '../src/engine/build.js';
 import { TOOLS } from '../src/mcp/tools.js';
+import { recordUsage } from '../src/mcp/server.js';
+import { readSavings, readUsage } from '../src/engine/savings.js';
 import { makeProject, cleanup, SAMPLE_FILES } from './helpers.js';
 import type { VgGraph } from '../src/schema.js';
 
@@ -110,5 +112,77 @@ describe('MCP tools', () => {
   it('get_node reports not_found for nonsense', () => {
     const r = tool('get_node').handler(graph, { name: 'zzznope' }) as { error?: string };
     expect(r.error).toBe('not_found');
+  });
+});
+
+describe('savings recording (vg serve --savings)', () => {
+  let root: string;
+  beforeAll(() => {
+    root = makeProject(SAMPLE_FILES);
+  });
+  afterAll(() => cleanup(root));
+
+  it('records a concise query_graph call — the default mode, which used to record nothing', async () => {
+    // Regression: recording keyed off `tokensEstimate`, which concise mode never
+    // set, so the ledger stayed empty and `vg savings` always read "off".
+    const result = await tool('query_graph').handler(graph, { question: 'order' }, { root, local: true });
+    expect((result as { tokensEstimate?: number }).tokensEstimate).toBeUndefined(); // concise: no estimate field
+    recordUsage(root, 'query_graph', result);
+
+    const report = readSavings(root, 30, Date.now());
+    expect(report.enabled).toBe(true);
+    expect(report.queries).toBe(1);
+    expect(report.vgTokens).toBeGreaterThan(0);
+    expect(report.baselineTokens).toBeGreaterThan(0);
+  });
+
+  it('records a get_node call, which never carried a tokensEstimate at all', () => {
+    const before = readSavings(root, 30, Date.now()).queries;
+    const result = tool('get_node').handler(graph, { name: 'OrderService.addItem' });
+    recordUsage(root, 'get_node', result);
+
+    const report = readSavings(root, 30, Date.now());
+    expect(report.queries).toBe(before + 1);
+    expect(report.vgTokens).toBeGreaterThan(0);
+    // Baseline counts the node's own file plus the files of the edges it returned.
+    expect(report.baselineTokens).toBeGreaterThan(0);
+  });
+});
+
+describe('usage breakdown (vg savings per-command)', () => {
+  let root: string;
+  beforeAll(() => {
+    root = makeProject(SAMPLE_FILES);
+  });
+  afterAll(() => cleanup(root));
+
+  it('records every tool with its outcome, and non-savings tools stay out of the token figures', async () => {
+    // A hit, a miss, and a non-savings tool — the breakdown covers all three.
+    recordUsage(root, 'query_graph', await tool('query_graph').handler(graph, { question: 'order' }, { root, local: true }));
+    recordUsage(root, 'query_graph', await tool('query_graph').handler(graph, { question: 'zzzz qqqq xyzzy' }, { root, local: true }));
+    recordUsage(root, 'get_node', tool('get_node').handler(graph, { name: 'zzznope' })); // not_found → miss
+    recordUsage(root, 'list_hubs', tool('list_hubs').handler(graph, {}));
+
+    const usage = readUsage(root, 30, Date.now());
+    expect(usage.totals.calls).toBe(4);
+    const byTool = Object.fromEntries(usage.commands.map((cmd) => [cmd.tool, cmd]));
+
+    expect(byTool.query_graph.calls).toBe(2);
+    expect(byTool.query_graph.miss).toBe(1); // the no-match pivot
+    expect(byTool.get_node.miss).toBe(1); // not_found
+    expect(byTool.list_hubs.calls).toBe(1);
+    expect(byTool.list_hubs.miss).toBe(0); // SAMPLE_FILES has hubs
+
+    // Success% is (complete+partial)/calls; avg weights each command equally.
+    for (const cmd of usage.commands) {
+      expect(cmd.successPct).toBe(Math.round(((cmd.complete + cmd.partial) / cmd.calls) * 100));
+    }
+    expect(usage.avgSuccessPct).toBe(
+      Math.round(usage.commands.reduce((s, cmd) => s + cmd.successPct, 0) / usage.commands.length),
+    );
+
+    // list_hubs is not a grep-baseline tool, so it never inflates the token savings.
+    const report = readSavings(root, 30, Date.now());
+    expect(report.queries).toBe(3); // 2 query_graph + 1 get_node, not list_hubs
   });
 });

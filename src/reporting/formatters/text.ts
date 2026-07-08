@@ -14,7 +14,7 @@ export function formatText(artifact: ScanArtifact): string {
   lines.push('');
   lines.push('   ' + teal('╭──────╮') + mint('➜'));
   lines.push('  ' + chalk.dim('┤') + teal('│') + ' ' + mint('◼') + '  ' + mint('◼') + ' ' + teal('│') + chalk.dim('├') + '  ' + chalk.bold.white('vibgrate'));
-  lines.push('  ' + chalk.dim('┤') + teal('│') + '  ' + chalk.dim('▁▁') + '  ' + teal('│') + chalk.dim('├') + '  ' + chalk.dim(`Drift Intelligence Engine v${VERSION}`));
+  lines.push('  ' + chalk.dim('┤') + teal('│') + '  ' + chalk.dim('▁▁') + '  ' + teal('│') + chalk.dim('├') + '  ' + chalk.dim(`Code Intelligence Engine v${VERSION}`));
   lines.push('   ' + teal('╰──────╯'));
   lines.push('');
   lines.push(...titleBox('Vibgrate Drift Report', teal));
