@@ -11,35 +11,44 @@ For a quick overview, see the [README](./README.md). This document covers everyt
 - [How It Works](#how-it-works)
 - [Choosing a rollout model: one-off vs CI](#choosing-a-rollout-model-one-off-vs-ci)
 - [Commands Reference](#commands-reference)
-  - [vg init](#vg-init)
-  - [vg scan](#vg-scan)
-  - [Vulnerabilities and exposure attribution](#vulnerabilities-and-exposure-attribution)
-  - [vg why](#vg-why)
-  - [vg bisect](#vg-bisect)
-  - [vg fix](#vg-fix)
   - [vg baseline](#vg-baseline)
+  - [vg bisect](#vg-bisect)
+  - [vg drift](#vg-drift)
+  - [vg dsn create](#vg-dsn-create)
+  - [vg fix](#vg-fix)
+  - [vg init](#vg-init)
+  - [vg login](#vg-login)
+  - [vg logout](#vg-logout)
+  - [vg push](#vg-push)
   - [vg report](#vg-report)
   - [vg sbom](#vg-sbom)
-  - [vg push](#vg-push)
-  - [vg dsn create](#vg-dsn-create)
+  - [vg scan](#vg-scan)
+    - [Vulnerabilities and exposure attribution](#vulnerabilities-and-exposure-attribution)
   - [vg update](#vg-update)
+  - [vg why](#vg-why)
 - [Code Graph Commands](#code-graph-commands)
-  - [vg build](#vg-build)
-  - [vg show](#vg-show)
   - [vg ask](#vg-ask)
-  - [vg impact](#vg-impact)
-  - [vg path](#vg-path)
-  - [vg tree](#vg-tree)
-  - [vg map / vg hubs / vg areas / vg oddities](#vg-map--vg-hubs--vg-areas--vg-oddities)
-  - [vg lib](#vg-lib)
-  - [vg serve](#vg-serve)
-  - [vg install](#vg-install)
-  - [vg share](#vg-share)
-  - [vg status](#vg-status)
-  - [vg facts](#vg-facts)
-  - [vg tests](#vg-tests)
+  - [vg benchmark](#vg-benchmark)
+  - [vg build](#vg-build)
+  - [vg bundle](#vg-bundle)
   - [vg embed](#vg-embed)
   - [vg export](#vg-export)
+  - [vg facts](#vg-facts)
+  - [vg guide](#vg-guide)
+  - [vg impact](#vg-impact)
+  - [vg install](#vg-install)
+  - [vg lib](#vg-lib)
+  - [vg map / vg hubs / vg areas / vg oddities](#vg-map--vg-hubs--vg-areas--vg-oddities)
+  - [vg models](#vg-models)
+  - [vg path](#vg-path)
+  - [vg savings](#vg-savings)
+  - [vg serve](#vg-serve)
+  - [vg share](#vg-share)
+  - [vg show](#vg-show)
+  - [vg status](#vg-status)
+  - [vg tests](#vg-tests)
+  - [vg tree](#vg-tree)
+  - [vg unknowns](#vg-unknowns)
 - [DriftScore](#driftscore)
 - [Drift Baselines & Fitness Functions](#drift-baselines--fitness-functions)
   - [How the Score Is Calculated](#how-the-score-is-calculated)
@@ -160,116 +169,15 @@ Expected results:
 
 ## Commands Reference
 
-### vg init
+### vg baseline
 
-Initialise Vibgrate in a project.
-
-```bash
-vg init [path] [--baseline] [--yes]
-```
-
-| Flag         | Description                                 |
-| ------------ | ------------------------------------------- |
-| `--baseline` | Create an initial drift baseline after init |
-| `--yes`      | Skip confirmation prompts                   |
-
-Creates:
-
-- `.vibgrate/` directory
-- `vibgrate.config.ts` with sensible defaults
-
----
-
-### vg scan
-
-The primary command. Scans your project for upgrade drift.
+Create a drift baseline snapshot for delta comparison.
 
 ```bash
-vg scan [path] [--vulns] [--full] [--format text|json|sarif|md] [--out <file>] [--fail-on warn|error] [--offline] [--package-manifest <file>] [--no-local-artifacts] [--max-privacy] [--baseline <file>] [--drift-budget <score>] [--drift-worsening <percent>] [--changed-only] [--concurrency <n>]
+vg baseline [path]
 ```
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--vulns` | — | Also detect known vulnerabilities (OSV online; offline via `--package-manifest` advisories) |
-| `--full` | — | Comprehensive scan: enables `--vulns` and reports banned dependencies when a standards policy exists |
-| `--format` | `text` | Output format: `text`, `json`, `sarif`, or `md` |
-| `--out <file>` | — | Write output to a file |
-| `--fail-on <level>` | — | Exit with code 2 if findings at this level exist |
-| `--baseline <file>` | — | Compare against a previous baseline |
-| `--changed-only` | — | Only scan changed files |
-| `--concurrency <n>` | `8` | Max concurrent npm registry calls |
-| `--drift-budget <score>` | — | Fitness gate: fail if drift score is above this budget |
-| `--drift-worsening <percent>` | — | Fitness gate: fail if drift worsens by more than % vs baseline |
-| `--push` | — | Upload scan artifact to Vibgrate Cloud after a successful scan |
-| `--dsn <dsn>` | `VIBGRATE_DSN` env | DSN used for `--push` authentication |
-| `--region <region>` | — | Override data residency (`us`, `eu`) during push |
-| `--strict` | — | Fail scan command if push fails |
-| `--ui-purpose` | — | Enable optional UI-purpose evidence extraction |
-| `--offline` | — | Disable network calls and disable upload/push behavior |
-| `--package-manifest <file>` | — | JSON or ZIP package-version manifest used for offline/latest lookups (latest bundle: `https://github.com/vibgrate/manifests/latest-packages.zip`) |
-| `--no-local-artifacts` | — | Do not write `.vibgrate/*.json` scan artifacts to disk |
-| `--max-privacy` | — | Hardened privacy mode with minimal scanners and no local artifacts |
-
-By default, the scan writes `.vibgrate/scan_result.json`. Use `--no-local-artifacts` or `--max-privacy` to suppress local JSON artifact files.
-
-For offline drift scoring, pass `--package-manifest <file>` with a downloaded manifest bundle such as `https://github.com/vibgrate/manifests/latest-packages.zip`.
-
-Examples:
-
-```bash
-# Standard text scan
-vg scan
-
-# JSON output for automation
-vg scan --format json --out scan.json
-
-# CI gate with baseline regression protection
-vg scan --baseline .vibgrate/baseline.json --drift-budget 40 --drift-worsening 5 --fail-on error
-
-# Upload result in the same command
-vg scan --push --strict
-```
-
-Expected results:
-
-- Clear score/risk output in terminal (or JSON/SARIF when selected).
-- Exit code `2` when configured quality gates are exceeded.
-- When `--push` is enabled, artifact upload is attempted after scan completion.
-
----
-
-### Vulnerabilities and exposure attribution
-
-`vg scan --vulns` matches your installed dependencies against the public OSV database and records each known vulnerability — advisory id and CVE, severity, CVSS, and the fixing version — in the scan artifact, as findings, and in SARIF. Supply advisories in a `--package-manifest` bundle to run it offline.
-
-In a git repository the scan also attributes each finding: the commit, author, and date that introduced the vulnerable version, and how long you have been exposed. These exposure windows aggregate into remediation metrics framed around the EU Cyber Resilience Act (CRA): open counts by severity, mean and maximum time exposed, and per-severity SLA breaches (defaults: critical 7 days, high 30, moderate 90, low 180). The metrics are descriptive — they show whether remediation keeps pace; they are not a compliance certification.
-
-The scan also reconstructs **closed** exposure windows from history — a vulnerable version that was later bumped out of the affected range or removed from the lockfile entirely — and reports real remediation time (MTTR) from them: measured, not estimated. Offline, a package-version manifest extends this to advisories that are fully fixed today, so a dependency that is clean now but was once vulnerable still counts toward your remediation record.
-
-Detection and attribution read each project's lockfile, so they cover npm / pnpm / yarn, pip / poetry / pipenv, cargo, composer, bundler, go, pub, hex, NuGet, and Maven/Gradle.
-
-```bash
-# Online detection against OSV
-vg scan --vulns
-
-# Air-gapped: advisories supplied in the manifest bundle
-vg scan --vulns --offline --package-manifest ./package-versions.zip
-
-# Everything in one run: drift + vulnerabilities + a banned-dependency report
-vg scan --full
-```
-
----
-
-### vg why
-
-Explain a dependency from git history: who added it, every version since, and any open vulnerabilities it carries.
-
-```bash
-vg why <package>
-```
-
-`vg why` reads your lockfile's history, so it works across npm / pnpm / yarn, pip / poetry, cargo, composer, bundler, go, pub, hex, NuGet, and Maven/Gradle projects. For Maven/Gradle the history comes from a resolved `gradle.lockfile`, or a `pom.xml`'s pinned direct-dependency versions (versions managed by a BOM/`dependencyManagement` aren't resolved). Open vulnerabilities and their introduction attribution come from your most recent `vg scan --vulns`.
+Runs a full scan and saves the result to `.vibgrate/baseline.json`. Use this as the starting point for tracking drift over time.
 
 ---
 
@@ -292,6 +200,45 @@ vg bisect lodash 4.17.21 --assert    # fails the build until lodash is patched t
 ```
 
 Exit codes: `0` when the query resolves, `2` when `--assert` finds the constraint unsatisfied, `3` when the package has no version history, `5` for an invalid version or range.
+
+---
+
+### vg drift
+
+What is outdated across your dependencies — a fast, offline currency check.
+
+```bash
+vg drift
+```
+
+Reads each project's lockfile and reports which dependencies have drifted behind their latest known version. Offline by default (uses the last-known catalog); add `--online` to check live registries for current latest versions.
+
+| Flag | Description |
+|------|-------------|
+| `--online` | Check live registries for the latest versions instead of the offline catalog |
+| `--fail-on <level>` | CI gate: exit non-zero when drift is found at this level (`major`, `minor`, or `standards`) |
+
+Add `--json` for machine-readable output.
+
+---
+
+### vg dsn create
+
+Generate an HMAC-signed DSN token for API authentication.
+
+```bash
+vg dsn create --workspace <id|new> [--region <region>] [--ingest <url>] [--write <path>]
+```
+
+| Flag          | Default    | Description                                                                 |
+| ------------- | ---------- | --------------------------------------------------------------------------- |
+| `--workspace` | _required_ | Your workspace ID, or `new` to auto-generate a workspace                    |
+| `--region`    | `us`       | Data residency region (`us`, `eu`)                                          |
+| `--ingest`    | —          | Custom ingest API URL (overrides `--region`)                                |
+| `--write`     | —          | Write DSN to a file (add to `.gitignore`!)                                  |
+
+When using `--workspace new`, the CLI auto-generates a workspace ID and provisions the DSN
+with the Vibgrate API. Rate limited to 1 new DSN per 5 minutes per IP address.
 
 ---
 
@@ -380,15 +327,68 @@ advisory at or above the threshold or an apply step fails.
 
 ---
 
-### vg baseline
+### vg init
 
-Create a drift baseline snapshot for delta comparison.
+Initialise Vibgrate in a project.
 
 ```bash
-vg baseline [path]
+vg init [path] [--baseline] [--yes]
 ```
 
-Runs a full scan and saves the result to `.vibgrate/baseline.json`. Use this as the starting point for tracking drift over time.
+| Flag         | Description                                 |
+| ------------ | ------------------------------------------- |
+| `--baseline` | Create an initial drift baseline after init |
+| `--yes`      | Skip confirmation prompts                   |
+
+Creates:
+
+- `.vibgrate/` directory
+- `vibgrate.config.ts` with sensible defaults
+
+---
+
+### vg login
+
+Authenticate the CLI with your Vibgrate workspace through the browser. Credentials are stored locally so `vg fix` and `vg push` can reach the hosted planner and Vibgrate Cloud.
+
+```bash
+vg login
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--region <region>` | `us` | Data-residency region (`us`, `eu`) |
+| `--ingest <url>` | — | Custom ingest API URL (overrides `--region`) |
+| `--no-browser` | — | Print the URL to open instead of launching a browser (headless / SSH) |
+
+---
+
+### vg logout
+
+Clear stored Vibgrate login credentials from this machine.
+
+```bash
+vg logout
+```
+
+---
+
+### vg push
+
+Upload scan results to the Vibgrate Cloud API.
+
+```bash
+vg push [--dsn <dsn>] [--file <file>] [--region <region>] [--strict]
+```
+
+| Flag       | Default                      | Description                                 |
+| ---------- | ---------------------------- | ------------------------------------------- |
+| `--dsn`    | `VIBGRATE_DSN` env           | DSN token for authentication                |
+| `--file`   | `.vibgrate/scan_result.json` | Scan artifact to upload                     |
+| `--region` | —                            | Override data residency region (`us`, `eu`) |
+| `--strict` | —                            | Fail hard on upload errors                  |
+
+Upload is always optional. Best-effort by default — use `--strict` in CI if you want the pipeline to fail on upload errors.
 
 ---
 
@@ -429,42 +429,84 @@ Use this to treat SBOMs as operational intelligence instead of static compliance
 
 ---
 
-### vg push
+### vg scan
 
-Upload scan results to the Vibgrate Cloud API.
+The primary command. Scans your project for upgrade drift.
 
 ```bash
-vg push [--dsn <dsn>] [--file <file>] [--region <region>] [--strict]
+vg scan [path] [--vulns] [--full] [--format text|json|sarif|md] [--out <file>] [--fail-on warn|error] [--offline] [--package-manifest <file>] [--no-local-artifacts] [--max-privacy] [--baseline <file>] [--drift-budget <score>] [--drift-worsening <percent>] [--changed-only] [--concurrency <n>]
 ```
 
-| Flag       | Default                      | Description                                 |
-| ---------- | ---------------------------- | ------------------------------------------- |
-| `--dsn`    | `VIBGRATE_DSN` env           | DSN token for authentication                |
-| `--file`   | `.vibgrate/scan_result.json` | Scan artifact to upload                     |
-| `--region` | —                            | Override data residency region (`us`, `eu`) |
-| `--strict` | —                            | Fail hard on upload errors                  |
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--vulns` | — | Also detect known vulnerabilities (OSV online; offline via `--package-manifest` advisories) |
+| `--full` | — | Comprehensive scan: enables `--vulns` and reports banned dependencies when a standards policy exists |
+| `--format` | `text` | Output format: `text`, `json`, `sarif`, or `md` |
+| `--out <file>` | — | Write output to a file |
+| `--fail-on <level>` | — | Exit with code 2 if findings at this level exist |
+| `--baseline <file>` | — | Compare against a previous baseline |
+| `--changed-only` | — | Only scan changed files |
+| `--concurrency <n>` | `8` | Max concurrent npm registry calls |
+| `--drift-budget <score>` | — | Fitness gate: fail if drift score is above this budget |
+| `--drift-worsening <percent>` | — | Fitness gate: fail if drift worsens by more than % vs baseline |
+| `--push` | — | Upload scan artifact to Vibgrate Cloud after a successful scan |
+| `--dsn <dsn>` | `VIBGRATE_DSN` env | DSN used for `--push` authentication |
+| `--region <region>` | — | Override data residency (`us`, `eu`) during push |
+| `--strict` | — | Fail scan command if push fails |
+| `--ui-purpose` | — | Enable optional UI-purpose evidence extraction |
+| `--offline` | — | Disable network calls and disable upload/push behavior |
+| `--package-manifest <file>` | — | JSON or ZIP package-version manifest used for offline/latest lookups (latest bundle: `https://github.com/vibgrate/manifests/latest-packages.zip`) |
+| `--no-local-artifacts` | — | Do not write `.vibgrate/*.json` scan artifacts to disk |
+| `--max-privacy` | — | Hardened privacy mode with minimal scanners and no local artifacts |
 
-Upload is always optional. Best-effort by default — use `--strict` in CI if you want the pipeline to fail on upload errors.
+By default, the scan writes `.vibgrate/scan_result.json`. Use `--no-local-artifacts` or `--max-privacy` to suppress local JSON artifact files.
+
+For offline drift scoring, pass `--package-manifest <file>` with a downloaded manifest bundle such as `https://github.com/vibgrate/manifests/latest-packages.zip`.
+
+Examples:
+
+```bash
+# Standard text scan
+vg scan
+
+# JSON output for automation
+vg scan --format json --out scan.json
+
+# CI gate with baseline regression protection
+vg scan --baseline .vibgrate/baseline.json --drift-budget 40 --drift-worsening 5 --fail-on error
+
+# Upload result in the same command
+vg scan --push --strict
+```
+
+Expected results:
+
+- Clear score/risk output in terminal (or JSON/SARIF when selected).
+- Exit code `2` when configured quality gates are exceeded.
+- When `--push` is enabled, artifact upload is attempted after scan completion.
 
 ---
 
-### vg dsn create
+### Vulnerabilities and exposure attribution
 
-Generate an HMAC-signed DSN token for API authentication.
+`vg scan --vulns` matches your installed dependencies against the public OSV database and records each known vulnerability — advisory id and CVE, severity, CVSS, and the fixing version — in the scan artifact, as findings, and in SARIF. Supply advisories in a `--package-manifest` bundle to run it offline.
+
+In a git repository the scan also attributes each finding: the commit, author, and date that introduced the vulnerable version, and how long you have been exposed. These exposure windows aggregate into remediation metrics framed around the EU Cyber Resilience Act (CRA): open counts by severity, mean and maximum time exposed, and per-severity SLA breaches (defaults: critical 7 days, high 30, moderate 90, low 180). The metrics are descriptive — they show whether remediation keeps pace; they are not a compliance certification.
+
+The scan also reconstructs **closed** exposure windows from history — a vulnerable version that was later bumped out of the affected range or removed from the lockfile entirely — and reports real remediation time (MTTR) from them: measured, not estimated. Offline, a package-version manifest extends this to advisories that are fully fixed today, so a dependency that is clean now but was once vulnerable still counts toward your remediation record.
+
+Detection and attribution read each project's lockfile, so they cover npm / pnpm / yarn, pip / poetry / pipenv, cargo, composer, bundler, go, pub, hex, NuGet, and Maven/Gradle.
 
 ```bash
-vg dsn create --workspace <id|new> [--region <region>] [--ingest <url>] [--write <path>]
+# Online detection against OSV
+vg scan --vulns
+
+# Air-gapped: advisories supplied in the manifest bundle
+vg scan --vulns --offline --package-manifest ./package-versions.zip
+
+# Everything in one run: drift + vulnerabilities + a banned-dependency report
+vg scan --full
 ```
-
-| Flag          | Default    | Description                                                                 |
-| ------------- | ---------- | --------------------------------------------------------------------------- |
-| `--workspace` | _required_ | Your workspace ID, or `new` to auto-generate a workspace                    |
-| `--region`    | `us`       | Data residency region (`us`, `eu`)                                          |
-| `--ingest`    | —          | Custom ingest API URL (overrides `--region`)                                |
-| `--write`     | —          | Write DSN to a file (add to `.gitignore`!)                                  |
-
-When using `--workspace new`, the CLI auto-generates a workspace ID and provisions the DSN
-with the Vibgrate API. Rate limited to 1 new DSN per 5 minutes per IP address.
 
 ---
 
@@ -482,6 +524,16 @@ vg update [--check] [--pm <manager>]
 | `--pm`    | Force a package manager (`npm`, `pnpm`, `yarn`, `bun`) |
 
 ---
+
+### vg why
+
+Explain a dependency from git history: who added it, every version since, and any open vulnerabilities it carries.
+
+```bash
+vg why <package>
+```
+
+`vg why` reads your lockfile's history, so it works across npm / pnpm / yarn, pip / poetry, cargo, composer, bundler, go, pub, hex, NuGet, and Maven/Gradle projects. For Maven/Gradle the history comes from a resolved `gradle.lockfile`, or a `pom.xml`'s pinned direct-dependency versions (versions managed by a BOM/`dependencyManagement` aren't resolved). Open vulnerabilities and their introduction attribution come from your most recent `vg scan --vulns`.
 
 ---
 
@@ -501,6 +553,45 @@ Vibgrate includes a full code graph engine — call trees, impact surfaces, sema
 | `--client <name>` | Identify the AI client (e.g. `claude`) so navigation calls are counted in `vg savings` |
 | `--deep` | Enable deep derivation (for `vg facts`, `vg build`) |
 | `--no-cache` | Skip and clear cached data |
+
+---
+
+### vg ask
+
+Ask the code map a question using hybrid lexical + structural + semantic search.
+
+```bash
+vg ask "<question>"
+```
+
+A local ONNX embedding model is downloaded once on first use, then cached and fully offline. Degrades gracefully to lexical-only under `--local` or `--no-semantic`.
+
+> **Semantic search is opt-in.** The embedding backend (`fastembed`, which pulls a native ONNX runtime) is declared as an **optional dependency**: package managers install it by default, but if it's absent — e.g. you installed with `--omit=optional`, or it failed to build on your platform — `vg ask` and `vg embed` transparently fall back to lexical + structural search. Nothing else in the CLI needs it, so `vg build`, `vg show`, `vg impact`, drift reporting, and MCP serving all run without it. If you never use semantic `ask`, you can install lean: `npm i @vibgrate/cli --omit=optional`.
+
+Before answering, `ask` checks whether files changed since the map was last built and, if so, rebuilds it incrementally first (only the changed files re-parse) — so answers always reflect the code as it is now. The check is stat-based and costs almost nothing when nothing changed; `--no-refresh` opts out.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `<question...>` | — | Your question |
+| `-b, --budget <n>` | `2000` | Approx token budget for returned context |
+| `--no-semantic` | — | Lexical only; skip the local embedding pass |
+| `--no-refresh` | — | Answer from the map as built; skip the auto-rebuild when files changed |
+
+---
+
+### vg benchmark
+
+A reproducible build + memory + token-reduction benchmark for this repository — honest, self-measured estimates you can re-run.
+
+```bash
+vg benchmark
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--budget <n>` | `2000` | Approx token budget used when estimating context savings |
+
+Add `--json` for machine-readable output.
 
 ---
 
@@ -531,277 +622,20 @@ Maps source code into a graph artifact, enabling all downstream queries (`vg sho
 
 ---
 
-### vg show
+### vg bundle
 
-Explain a single node: what it is, what it calls, what calls it.
-
-```bash
-vg show <name>
-```
-
-| Flag | Description |
-|------|-------------|
-| `<name>` | Qualified name, short name, `file:line`, glob, or id |
-| `--pick <n>` | Pick the nth candidate when ambiguous |
-
-Outputs the qualified name, kind, file location, signature, importance score, area, extends relationships, callees, and callers.
-
----
-
-### vg ask
-
-Ask the code map a question using hybrid lexical + structural + semantic search.
+Build an air-gapped bundle — grammars, the code graph, and the library catalog — for use on a machine with no network.
 
 ```bash
-vg ask "<question>"
-```
-
-A local ONNX embedding model is downloaded once on first use, then cached and fully offline. Degrades gracefully to lexical-only under `--local` or `--no-semantic`.
-
-> **Semantic search is opt-in.** The embedding backend (`fastembed`, which pulls a native ONNX runtime) is declared as an **optional dependency**: package managers install it by default, but if it's absent — e.g. you installed with `--omit=optional`, or it failed to build on your platform — `vg ask` and `vg embed` transparently fall back to lexical + structural search. Nothing else in the CLI needs it, so `vg build`, `vg show`, `vg impact`, drift reporting, and MCP serving all run without it. If you never use semantic `ask`, you can install lean: `npm i @vibgrate/cli --omit=optional`.
-
-Before answering, `ask` checks whether files changed since the map was last built and, if so, rebuilds it incrementally first (only the changed files re-parse) — so answers always reflect the code as it is now. The check is stat-based and costs almost nothing when nothing changed; `--no-refresh` opts out.
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `<question...>` | — | Your question |
-| `-b, --budget <n>` | `2000` | Approx token budget for returned context |
-| `--no-semantic` | — | Lexical only; skip the local embedding pass |
-| `--no-refresh` | — | Answer from the map as built; skip the auto-rebuild when files changed |
-
----
-
-### vg impact
-
-What breaks if you change it — deterministic structural blast radius.
-
-```bash
-vg impact <name>
-```
-
-Reverse reachability with decay confidence. With `--tests`, returns exactly the tests to run before shipping.
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `<name>` | — | Node to assess |
-| `--depth <n>` | `4` | Max traversal depth |
-| `--tests` | — | Also surface the tests covering the affected set |
-| `--fail-on-untested` | — | Exit 2 if any affected node is untested (CI gate) |
-| `--pick <n>` | — | Pick the nth candidate when ambiguous |
-
----
-
-### vg path
-
-Show how A connects to B — shortest path in the call graph.
-
-```bash
-vg path <a> <b>
-```
-
-| Flag | Description |
-|------|-------------|
-| `<a>` | Source node |
-| `<b>` | Target node |
-| `--pick-a <n>` | Pick the nth candidate for A |
-| `--pick-b <n>` | Pick the nth candidate for B |
-
----
-
-### vg tree
-
-The call tree rooted at a node.
-
-```bash
-vg tree <name>
-```
-
-Callees by default; `--callers` to invert. Depth-bounded and cycle-safe.
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `<name>` | — | Root node |
-| `--callers` | — | Show callers instead of callees |
-| `--depth <n>` | `3` | Max depth |
-| `--pick <n>` | — | Pick the nth candidate when ambiguous |
-
----
-
-### vg map / vg hubs / vg areas / vg oddities
-
-Map-level insights — read-only views over the committed graph.
-
-```bash
-vg map      # Overview: areas, hubs, untested hotspots
-vg hubs     # Most-depended-on code (centrality outliers)
-vg areas    # Natural groupings (communities), each labelled and sized
-vg oddities # Surprising cross-area links (architectural smells)
-```
-
-| Command | Flag | Default | Description |
-|---------|------|---------|-------------|
-| `vg hubs` | `-n, --limit <n>` | `20` | How many hubs to show |
-| `vg areas` | `-n, --limit <n>` | `30` | How many areas to show |
-| `vg oddities` | `-n, --limit <n>` | `20` | How many oddities to show |
-
----
-
-### vg lib
-
-Version-correct library docs — from the hosted catalog or local ingestion.
-
-```bash
-vg lib                  # List the catalog
-vg lib <name>           # Show docs for a library (pinned to your lockfile version)
-vg lib add <source>     # Ingest docs from a local source
-vg lib publish <name>   # Upload private library docs to the hosted catalog
-vg lib resolve <name>   # Resolve name → catalog id + version
-vg lib refresh          # Re-ingest all local sources
+vg bundle
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--name <name>` | — | Library name (for `add`) |
-| `--version <v>` | — | Pin the doc version (for `add`/`publish`) |
-| `-b, --budget <n>` | — | Trim docs to ~N tokens |
-| `--readme <path>` | `./README.md` | README path (for `publish`) |
-| `--dts <path>` | — | TypeScript declaration path (for `publish`) |
-| `--language <lang>` | — | Primary language (for `publish`) |
-| `--region <region>` | `us` | Data-residency region for the hosted catalog |
-| `--ingest <url>` | — | Hosted catalog URL override (wins over `--region`) |
+| `--offline` | — | Build using only locally-available assets |
+| `-o, --out <dir>` | `vg-bundle` | Output directory for the bundle |
 
----
-
-### vg serve
-
-Start Vibgrate AI Context — a local-first MCP serving your code map, drift, and version-correct docs to your AI assistant (fully offline under `--local`).
-
-```bash
-vg serve
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--http` | — | Serve over streamable HTTP instead of stdio |
-| `--port <n>` | `7437` | Port for `--http` |
-| `--host <h>` | `127.0.0.1` | Host for `--http` |
-| `--savings` | — | Record local, counts-only usage savings (opt-in) |
-| `--share-stats` | — | Also upload the counts-only usage ledger to Vibgrate to improve the local MCP (opt-in; off by default; implies `--savings`; disabled under `--local`) |
-| `--dedup` | — | Collapse a node's heavy relation lists on repeat reads within a session, to save tokens (opt-in) |
-| `--no-refresh` | — | Serve the map as built; skip the auto-rebuild when files change |
-
-Via stdio (default), your AI assistant spawns the server. Via `--http`, it runs as a local HTTP endpoint for browser or shared access.
-
-**Usage stats — local by default, sharing is opt-in.** `--savings` records a *counts-only* ledger under `.vibgrate/` — per navigation call: which tool, how it resolved (complete/partial/miss), the vg-vs-grep token figures, whether it came over the MCP (`mcp`) or the `vg` CLI (`cli`), and a coarse client label (which AI). `vg savings` reports it locally; nothing leaves your machine. `--share-stats` additionally uploads that same counts-only ledger to Vibgrate periodically, so we can see how the local MCP is used and improve it. It **never** sends code, file paths, question text, repo identity, or any credential — only counts, outcomes, token figures, the vg version, your OS/arch, and a random per-install id. It's off unless you pass the flag, is disabled entirely under `--local`, and the endpoint can be overridden with `VIBGRATE_STATS_ENDPOINT`.
-
-**Attributing CLI calls.** The MCP path detects the calling client automatically from the connection handshake. For CLI calls, pass `--client=<ai>` (e.g. `vg "how does auth work" --client=claude`) so the call is attributed in `vg savings` and any shared stats — this is what `vg install` writes into each assistant's skill. Without `--client`, a bare `vg ask` records nothing.
-
-**The map stays fresh while you (or your AI) edit code.** Each tool call runs a cheap stat-only freshness check against the last build; when files really changed, the server rebuilds the map incrementally in-process — only changed files re-parse — and answers from the updated graph. Probes are debounced with a self-tuning cadence (2s floor, scaling with measured probe cost so probing never exceeds a few percent of serve time even on very large repos), rebuilds are single-flight and cross-process locked, and touch-only changes (a `git checkout`, a re-save with identical content) are recognized by content hash and never trigger a rebuild. There is no filesystem watcher and no daemon: freshness is checked exactly when it matters — at query time. The server also hot-reloads `graph.json` whenever it changes on disk, so an external `vg` build is picked up on the next call too.
-
-The server exposes read-only tools your assistant can call over the code map and dependency data, including:
-
-- `query_graph`, `get_node`, `find_path`, `impact_of`, `tests_for` — navigate and reason about the code map.
-- `check_drift` — offline dependency inventory; pass `attribute: true` to add git "who added this / who set the version" attribution.
-- `list_vulnerabilities`, `vuln_attribution` — known vulnerabilities and their exposure attribution from the last `vg scan --vulns`.
-- `upgrade_impact` — what an upgrade will cost: version distance, how many files import the package, the vulnerabilities it fixes, and — with `changelog: true` — online breaking-change notes between your version and the latest.
-- `resolve_library`, `library_docs` — version-correct, drift-annotated library docs.
-
-All tools are read-only. The server is local-first: it always answers from your machine when it can, and its only network touches are the embedder's one-time model fetch, `upgrade_impact`'s `changelog`, and `library_docs`' fall-through to the hosted catalog when the local docs for a library are thin or missing. `--local` is the hard airgap — it disables all three.
-
----
-
-### vg install
-
-Add Vibgrate AI Context to your AI assistant(s) — skill, MCP wiring, and advisory nudge.
-
-```bash
-vg install [tools...]
-vg uninstall <tools...>
-```
-
-Idempotent and repo-local (changes can be committed and shared with your team).
-
-**Supported assistants:** `claude`, `cursor`, `windsurf`, `vscode`, `codex`, `gemini`
-
-| Flag | Description |
-|------|-------------|
-| `[tools...]` | Assistant ids to install for |
-| `--all` | Install for every supported assistant |
-| `--list` | Show the support matrix and exit |
-| `--no-hook` | Skip the advisory nudge |
-
-**`vg uninstall` flags:**
-
-| Flag | Description |
-|------|-------------|
-| `<tools...>` | Assistant ids to remove (required) |
-| `--purge` | Also delete the skill file |
-
----
-
-### vg share
-
-Make the code map committable and auto-updating for your team.
-
-```bash
-vg share
-```
-
-Installs a pre-commit hook, deterministic merge driver, and `.gitignore` so the map stays fresh without any manual steps.
-
-| Flag | Description |
-|------|-------------|
-| `--undo` | Reverse what `vg share` installed |
-| `--reports` | Also commit `graph.html` / `GRAPH_REPORT.md` (default: gitignored) |
-
----
-
-### vg status
-
-Graph freshness, counts, and staleness — compared against the working tree.
-
-```bash
-vg status
-```
-
-Outputs: map path, generation timestamp, node/edge/area counts, languages, cluster method, resolver rungs used, cache status, and stale file count. When a build has run on this machine, staleness is exact (per-file stat + content hash against the last build's snapshot — edits, adds, and removes); otherwise it falls back to comparing the file set.
-
----
-
-### vg facts
-
-Deterministic open facts for a node (contract, invariant, characterization).
-
-```bash
-vg facts <name>
-```
-
-Epistemic-typed: declared/static → observed/derived. Requires `--deep` for derived facts beyond basic declarations.
-
-| Flag | Description |
-|------|-------------|
-| `<name>` | Node to inspect |
-| `--pick <n>` | Pick the nth candidate when ambiguous |
-
----
-
-### vg tests
-
-Which tests cover a node (call/coverage linkage).
-
-```bash
-vg tests <name>
-```
-
-`--missing` flips to show untested nodes nearby. `--run` prints (or `--exec` runs) the minimal command to exercise exactly those tests.
-
-| Flag | Description |
-|------|-------------|
-| `<name>` | Node to inspect |
-| `--missing` | Show untested nodes nearby instead |
-| `--run` | Print the command to run exactly these tests |
-| `--exec` | Run that command |
-| `--pick <n>` | Pick the nth candidate when ambiguous |
+Add `--json` for machine-readable output.
 
 ---
 
@@ -843,6 +677,320 @@ Format is inferred from the file extension. Use `-` for stdout.
 | `.html` | HTML visualization |
 | `.cdx.json` | CycloneDX SBOM / AI-BOM |
 | `.spdx.json` | SPDX |
+
+---
+
+### vg facts
+
+Deterministic open facts for a node (contract, invariant, characterization).
+
+```bash
+vg facts <name>
+```
+
+Epistemic-typed: declared/static → observed/derived. Requires `--deep` for derived facts beyond basic declarations.
+
+| Flag | Description |
+|------|-------------|
+| `<name>` | Node to inspect |
+| `--pick <n>` | Pick the nth candidate when ambiguous |
+
+---
+
+### vg guide
+
+Cited, relevant standards and practices for a node — the free standards pack.
+
+```bash
+vg guide <name>
+```
+
+| Flag | Description |
+|------|-------------|
+| `<name>` | Node to inspect |
+| `--pick <n>` | Pick the nth candidate when ambiguous |
+
+---
+
+### vg impact
+
+What breaks if you change it — deterministic structural blast radius.
+
+```bash
+vg impact <name>
+```
+
+Reverse reachability with decay confidence. With `--tests`, returns exactly the tests to run before shipping.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `<name>` | — | Node to assess |
+| `--depth <n>` | `4` | Max traversal depth |
+| `--tests` | — | Also surface the tests covering the affected set |
+| `--fail-on-untested` | — | Exit 2 if any affected node is untested (CI gate) |
+| `--pick <n>` | — | Pick the nth candidate when ambiguous |
+
+---
+
+### vg install
+
+Add Vibgrate AI Context to your AI assistant(s) — skill, MCP wiring, and advisory nudge.
+
+```bash
+vg install [tools...]
+vg uninstall <tools...>
+```
+
+Idempotent and repo-local (changes can be committed and shared with your team).
+
+**Supported assistants:** `claude`, `cursor`, `windsurf`, `vscode`, `codex`, `gemini`
+
+| Flag | Description |
+|------|-------------|
+| `[tools...]` | Assistant ids to install for |
+| `--all` | Install for every supported assistant |
+| `--list` | Show the support matrix and exit |
+| `--no-hook` | Skip the advisory nudge |
+
+**`vg uninstall` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `<tools...>` | Assistant ids to remove (required) |
+| `--purge` | Also delete the skill file |
+
+---
+
+### vg lib
+
+Version-correct library docs — from the hosted catalog or local ingestion.
+
+```bash
+vg lib                  # List the catalog
+vg lib <name>           # Show docs for a library (pinned to your lockfile version)
+vg lib add <source>     # Ingest docs from a local source
+vg lib publish <name>   # Upload private library docs to the hosted catalog
+vg lib resolve <name>   # Resolve name → catalog id + version
+vg lib refresh          # Re-ingest all local sources
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--name <name>` | — | Library name (for `add`) |
+| `--version <v>` | — | Pin the doc version (for `add`/`publish`) |
+| `-b, --budget <n>` | — | Trim docs to ~N tokens |
+| `--readme <path>` | `./README.md` | README path (for `publish`) |
+| `--dts <path>` | — | TypeScript declaration path (for `publish`) |
+| `--language <lang>` | — | Primary language (for `publish`) |
+| `--region <region>` | `us` | Data-residency region for the hosted catalog |
+| `--ingest <url>` | — | Hosted catalog URL override (wins over `--region`) |
+
+---
+
+### vg map / vg hubs / vg areas / vg oddities
+
+Map-level insights — read-only views over the committed graph.
+
+```bash
+vg map      # Overview: areas, hubs, untested hotspots
+vg hubs     # Most-depended-on code (centrality outliers)
+vg areas    # Natural groupings (communities), each labelled and sized
+vg oddities # Surprising cross-area links (architectural smells)
+```
+
+| Command | Flag | Default | Description |
+|---------|------|---------|-------------|
+| `vg hubs` | `-n, --limit <n>` | `20` | How many hubs to show |
+| `vg areas` | `-n, --limit <n>` | `30` | How many areas to show |
+| `vg oddities` | `-n, --limit <n>` | `20` | How many oddities to show |
+
+---
+
+### vg models
+
+The local model fleet — Ollama, LM Studio, and on-disk `gguf` models — discovered entirely offline.
+
+```bash
+vg models
+```
+
+Lists the local inference backends and models Vibgrate can see, so you know what is available without any network calls. Add `--json` for machine-readable output.
+
+---
+
+### vg path
+
+Show how A connects to B — shortest path in the call graph.
+
+```bash
+vg path <a> <b>
+```
+
+| Flag | Description |
+|------|-------------|
+| `<a>` | Source node |
+| `<b>` | Target node |
+| `--pick-a <n>` | Pick the nth candidate for A |
+| `--pick-b <n>` | Pick the nth candidate for B |
+
+---
+
+### vg savings
+
+A local, privacy-safe report of the tokens and dollars saved by querying the map instead of grepping and reading whole files.
+
+```bash
+vg savings
+```
+
+Reads the counts-only usage ledger recorded when you run `vg serve --savings` (or pass `--client` on CLI navigation calls). Nothing leaves your machine — the figures are estimates.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--days <n>` | `30` | Reporting window in days |
+
+Add `--json` for machine-readable output.
+
+---
+
+### vg serve
+
+Start Vibgrate AI Context — a local-first MCP serving your code map, drift, and version-correct docs to your AI assistant (fully offline under `--local`).
+
+```bash
+vg serve
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--http` | — | Serve over streamable HTTP instead of stdio |
+| `--port <n>` | `7437` | Port for `--http` |
+| `--host <h>` | `127.0.0.1` | Host for `--http` |
+| `--savings` | — | Record local, counts-only usage savings (opt-in) |
+| `--share-stats` | — | Also upload the counts-only usage ledger to Vibgrate to improve the local MCP (opt-in; off by default; implies `--savings`; disabled under `--local`) |
+| `--dedup` | — | Collapse a node's heavy relation lists on repeat reads within a session, to save tokens (opt-in) |
+| `--no-refresh` | — | Serve the map as built; skip the auto-rebuild when files change |
+
+Via stdio (default), your AI assistant spawns the server. Via `--http`, it runs as a local HTTP endpoint for browser or shared access.
+
+**Usage stats — local by default, sharing is opt-in.** `--savings` records a *counts-only* ledger under `.vibgrate/` — per navigation call: which tool, how it resolved (complete/partial/miss), the vg-vs-grep token figures, whether it came over the MCP (`mcp`) or the `vg` CLI (`cli`), and a coarse client label (which AI). `vg savings` reports it locally; nothing leaves your machine. `--share-stats` additionally uploads that same counts-only ledger to Vibgrate periodically, so we can see how the local MCP is used and improve it. It **never** sends code, file paths, question text, repo identity, or any credential — only counts, outcomes, token figures, the vg version, your OS/arch, and a random per-install id. It's off unless you pass the flag, is disabled entirely under `--local`, and the endpoint can be overridden with `VIBGRATE_STATS_ENDPOINT`.
+
+**Attributing CLI calls.** The MCP path detects the calling client automatically from the connection handshake. For CLI calls, pass `--client=<ai>` (e.g. `vg "how does auth work" --client=claude`) so the call is attributed in `vg savings` and any shared stats — this is what `vg install` writes into each assistant's skill. Without `--client`, a bare `vg ask` records nothing.
+
+**The map stays fresh while you (or your AI) edit code.** Each tool call runs a cheap stat-only freshness check against the last build; when files really changed, the server rebuilds the map incrementally in-process — only changed files re-parse — and answers from the updated graph. Probes are debounced with a self-tuning cadence (2s floor, scaling with measured probe cost so probing never exceeds a few percent of serve time even on very large repos), rebuilds are single-flight and cross-process locked, and touch-only changes (a `git checkout`, a re-save with identical content) are recognized by content hash and never trigger a rebuild. There is no filesystem watcher and no daemon: freshness is checked exactly when it matters — at query time. The server also hot-reloads `graph.json` whenever it changes on disk, so an external `vg` build is picked up on the next call too.
+
+The server exposes read-only tools your assistant can call over the code map and dependency data, including:
+
+- `query_graph`, `get_node`, `find_path`, `impact_of`, `tests_for` — navigate and reason about the code map.
+- `check_drift` — offline dependency inventory; pass `attribute: true` to add git "who added this / who set the version" attribution.
+- `list_vulnerabilities`, `vuln_attribution` — known vulnerabilities and their exposure attribution from the last `vg scan --vulns`.
+- `upgrade_impact` — what an upgrade will cost: version distance, how many files import the package, the vulnerabilities it fixes, and — with `changelog: true` — online breaking-change notes between your version and the latest.
+- `resolve_library`, `library_docs` — version-correct, drift-annotated library docs.
+
+All tools are read-only. The server is local-first: it always answers from your machine when it can, and its only network touches are the embedder's one-time model fetch, `upgrade_impact`'s `changelog`, and `library_docs`' fall-through to the hosted catalog when the local docs for a library are thin or missing. `--local` is the hard airgap — it disables all three.
+
+---
+
+### vg share
+
+Make the code map committable and auto-updating for your team.
+
+```bash
+vg share
+```
+
+Installs a pre-commit hook, deterministic merge driver, and `.gitignore` so the map stays fresh without any manual steps.
+
+| Flag | Description |
+|------|-------------|
+| `--undo` | Reverse what `vg share` installed |
+| `--reports` | Also commit `graph.html` / `GRAPH_REPORT.md` (default: gitignored) |
+
+---
+
+### vg show
+
+Explain a single node: what it is, what it calls, what calls it.
+
+```bash
+vg show <name>
+```
+
+| Flag | Description |
+|------|-------------|
+| `<name>` | Qualified name, short name, `file:line`, glob, or id |
+| `--pick <n>` | Pick the nth candidate when ambiguous |
+
+Outputs the qualified name, kind, file location, signature, importance score, area, extends relationships, callees, and callers.
+
+---
+
+### vg status
+
+Graph freshness, counts, and staleness — compared against the working tree.
+
+```bash
+vg status
+```
+
+Outputs: map path, generation timestamp, node/edge/area counts, languages, cluster method, resolver rungs used, cache status, and stale file count. When a build has run on this machine, staleness is exact (per-file stat + content hash against the last build's snapshot — edits, adds, and removes); otherwise it falls back to comparing the file set.
+
+---
+
+### vg tests
+
+Which tests cover a node (call/coverage linkage).
+
+```bash
+vg tests <name>
+```
+
+`--missing` flips to show untested nodes nearby. `--run` prints (or `--exec` runs) the minimal command to exercise exactly those tests.
+
+| Flag | Description |
+|------|-------------|
+| `<name>` | Node to inspect |
+| `--missing` | Show untested nodes nearby instead |
+| `--run` | Print the command to run exactly these tests |
+| `--exec` | Run that command |
+| `--pick <n>` | Pick the nth candidate when ambiguous |
+
+---
+
+### vg tree
+
+The call tree rooted at a node.
+
+```bash
+vg tree <name>
+```
+
+Callees by default; `--callers` to invert. Depth-bounded and cycle-safe.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `<name>` | — | Root node |
+| `--callers` | — | Show callers instead of callees |
+| `--depth <n>` | `3` | Max depth |
+| `--pick <n>` | — | Pick the nth candidate when ambiguous |
+
+---
+
+### vg unknowns
+
+What the graph cannot resolve, ranked by blast radius — the unresolved references most worth teaching the map about.
+
+```bash
+vg unknowns
+```
+
+Surfaces the symbols and imports the resolver could not tie to a definition, ordered by how much depends on them, so you can see where a SCIP index or a targeted `--only` language pass would most improve resolution.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-n, --limit <n>` | `20` | How many to show |
+
+Add `--json` for machine-readable output.
 
 ---
 

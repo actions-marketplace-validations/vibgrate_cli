@@ -72,13 +72,13 @@ describe('MCP tools', () => {
   });
 
   it('search_symbols finds symbols first and falls through to literal text', async () => {
-    const bySymbol = tool('search_symbols').handler(graph, { query: 'double' }, { root: dir, local: true }) as {
+    const bySymbol = (await tool('search_symbols').handler(graph, { query: 'double' }, { root: dir, local: true })) as {
       matches: { kind: string; name?: string; file: string; line: number }[];
     };
     expect(bySymbol.matches.length).toBeGreaterThan(0);
     expect(bySymbol.matches[0].kind).not.toBe('text');
 
-    const byText = tool('search_symbols').handler(graph, { query: 'zz-no-symbol-has-this' }, { root: dir, local: true }) as {
+    const byText = (await tool('search_symbols').handler(graph, { query: 'zz-no-symbol-has-this' }, { root: dir, local: true })) as {
       matches: unknown[];
       hint?: string;
     };

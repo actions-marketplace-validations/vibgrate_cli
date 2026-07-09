@@ -150,7 +150,9 @@ export function createServer(source: GraphSource, opts: ServeOptions = {}): Serv
       // `instructions` get it at zero per-step schema cost): the flashlight
       // vs the map.
       instructions:
-        'vg is a code map. Use search_symbols to find a known name or literal string fast. ' +
+        'vg is a code map. Use search_symbols to find a known name or literal string fast — ' +
+        'a multi-word/quoted phrase runs a complete literal sweep and reports totalTextMatches, ' +
+        'so reach for it instead of grep even for plain-string "find every occurrence" lookups. ' +
         'Use orient/query_graph for meaning: symptoms, relationships, and what-breaks-if. ' +
         'Responses are concise by default; pass response_format:"detailed" only when a node proves load-bearing. ' +
         // Stop-discipline: the failure mode on a focused task is over-navigation
