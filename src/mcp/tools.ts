@@ -250,16 +250,17 @@ export const TOOLS: VgTool[] = [
   },
   {
     name: 'search_symbols',
-    description: 'Find a known name or string fast: ranked symbol lookup with literal file-search fallthrough. Use first for most discovery; use query_graph for meaning.',
+    description:
+      'Find a known name or literal string fast: ranked symbol lookup, plus a complete literal file-search for any quoted/multi-word phrase (config keys, log lines, UI copy). A phrase query reports totalTextMatches so you know you have every occurrence — use it instead of grep. Use first for most discovery; use query_graph for meaning.',
     inputSchema: obj(
       {
-        query: { type: 'string', maxLength: 120 },
-        limit: { type: 'number', description: 'default 8, max 20' },
+        query: { type: 'string', maxLength: 120, description: 'a symbol name, or a literal phrase to sweep for every occurrence of' },
+        limit: { type: 'number', description: 'default 8, max 50 (raise it to fetch a whole literal sweep in one call)' },
       },
       ['query'],
     ),
-    handler: (graph, args, ctx) => {
-      const limit = Math.min(20, numOr(args.limit, 8));
+    handler: async (graph, args, ctx) => {
+      const limit = Math.min(50, numOr(args.limit, 8));
       return searchSymbols(graph, ctx.root, String(args.query ?? ''), limit);
     },
   },

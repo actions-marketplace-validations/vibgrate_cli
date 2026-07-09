@@ -269,42 +269,49 @@ See [docs/QUICKSTART-PROMPT.md](./docs/QUICKSTART-PROMPT.md) for the full prompt
 
 | Command | Description |
 | --- | --- |
-| `vg build [path]` | Build / update the code map (incremental, deterministic) |
-| `vg show <file>` | Explain a node: what it is, what it calls, what calls it |
 | `vg ask "<question>"` | Query the map in natural language |
-| `vg impact <file>` | What breaks if you change it — and the tests to run |
-| `vg path <from> <to>` | How A connects to B (shortest path) |
-| `vg tree <file>` | Call tree rooted at a node |
-| `vg insights` | Overview: hubs, hotspots, untested paths |
-| `vg lib <package>` | Version-correct, drift-annotated library docs |
-| `vg serve` | Start **Vibgrate AI Context** (local-first MCP: code map + drift + version-correct docs) |
-| `vg install` | Wire **Vibgrate AI Context** + skill into your AI assistant |
-| `vg share` | Make the graph committable + auto-updating for your team |
-| `vg status` | Cache/freshness, counts, staleness |
-| `vg facts <file>` | Deterministic facts for a node (contracts, invariants) |
-| `vg tests <file>` | Which tests cover a node |
+| `vg benchmark` | Reproducible build + memory + token-reduction benchmark (honest estimates) |
+| `vg build [path]` | Build / update the code map (incremental, deterministic) |
+| `vg bundle` | Build an air-gapped bundle (grammars + graph + library catalog) |
 | `vg embed` | Precompute the semantic index for instant `vg ask` |
 | `vg export` | Export the map (json / ndjson / graphml / dot / cypher / md / html / SBOM) |
+| `vg facts <file>` | Deterministic facts for a node (contracts, invariants) |
+| `vg guide <file>` | Cited standards / practices for a node (free pack) |
+| `vg impact <file>` | What breaks if you change it — and the tests to run |
+| `vg install` / `vg uninstall` | Wire (or remove) **Vibgrate AI Context** + skill in your AI assistant |
+| `vg lib <package>` | Version-correct, drift-annotated library docs |
+| `vg map` / `vg hubs` / `vg areas` / `vg oddities` | Map insights: overview, most-depended-on code, natural groupings, cross-area smells |
+| `vg models` | The local model fleet (Ollama / LM Studio / gguf), discovered offline |
+| `vg path <from> <to>` | How A connects to B (shortest path) |
+| `vg savings` | Local report of tokens/$ saved vs a grep baseline (estimates) |
+| `vg serve` | Start **Vibgrate AI Context** (local-first MCP: code map + drift + version-correct docs) |
+| `vg share` | Make the graph committable + auto-updating for your team |
+| `vg show <file>` | Explain a node: what it is, what it calls, what calls it |
+| `vg status` | Cache/freshness, counts, staleness |
+| `vg tests <file>` | Which tests cover a node |
+| `vg tree <file>` | Call tree rooted at a node |
+| `vg unknowns` | What the graph cannot resolve, ranked by blast radius |
 
 ### Drift reporting
 
 | Command | Description |
 | --- | --- |
+| `vg baseline [path]` | Create a drift baseline |
+| `vg bisect <package> <constraint>` | The commit where a dependency crossed a version line (`--assert` to gate CI) |
+| `vg drift` | What is outdated across dependencies (offline; `--online` for currency) |
+| `vg dsn create` | Generate a DSN token |
+| `vg fix` | Ranked, risk-tiered upgrade plans from the hosted planner — then apply the one you choose |
+| `vg init [path]` | Initialise config and `.vibgrate/` |
+| `vg login` / `vg logout` | Authenticate the CLI with your Vibgrate workspace (or clear stored credentials) |
+| `vg push` | Upload scan results to Vibgrate Cloud |
+| `vg report` | Generate a report from a scan artifact |
+| `vg sbom export` / `delta` / `vex` | Export CycloneDX/SPDX SBOM, diff two artifacts, or emit an OpenVEX document |
 | `vg scan [path]` | Scan for upgrade drift |
 | `vg scan --vulns` | Also detect known vulnerabilities (OSV; offline via `--package-manifest`) |
 | `vg scan --full` | Comprehensive scan: drift + vulnerabilities + a banned-dependency report |
-| `vg why <package>` | Who introduced a dependency, its version history, and any open vulnerabilities |
-| `vg bisect <package> <constraint>` | The commit where a dependency crossed a version line (`--assert` to gate CI) |
 | `vg scan --push` | Scan and push results to Vibgrate Cloud |
-| `vg baseline [path]` | Create a drift baseline |
-| `vg report` | Generate a report from a scan artifact |
-| `vg sbom export` | Export CycloneDX or SPDX SBOM |
-| `vg sbom delta` | Compare two artifacts for SBOM drift |
-| `vg vex` | Generate an OpenVEX document for attestation |
-| `vg init [path]` | Initialise config and `.vibgrate/` |
-| `vg push` | Upload scan results to Vibgrate Cloud |
-| `vg dsn create` | Generate a DSN token |
 | `vg update` | Check for and install updates |
+| `vg why <package>` | Who introduced a dependency, its version history, and any open vulnerabilities |
 
 ```bash
 vg scan [path] [--vulns] [--full] [--format text|json|sarif|md] [--out <file>] [--fail-on warn|error] \

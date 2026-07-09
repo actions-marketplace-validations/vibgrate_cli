@@ -19,26 +19,26 @@ beforeAll(async () => {
 afterAll(() => cleanup(dir));
 
 describe('searchSymbols', () => {
-  it('resolves a known exact name (primary path, unchanged)', () => {
-    const r = searchSymbols(graph, dir, 'newScanModal', 8);
+  it('resolves a known exact name (primary path, unchanged)', async () => {
+    const r = await searchSymbols(graph, dir, 'newScanModal', 8);
     expect(r.matches[0]?.name).toContain('newScanModal');
   });
 
-  it('resolves a multi-word phrase via per-token fallthrough', () => {
+  it('resolves a multi-word phrase via per-token fallthrough', async () => {
     // The whole-string name index misses "new scan modal"; the fallthrough unions
     // per-token matches and ranks by coverage. Before, this was an empty dead end.
-    const r = searchSymbols(graph, dir, 'new scan modal', 8);
+    const r = await searchSymbols(graph, dir, 'new scan modal', 8);
     expect(r.matches.length).toBeGreaterThan(0);
     expect(r.matches.some((m) => 'name' in m && m.name.includes('newScanModal'))).toBe(true);
   });
 
-  it('ranks the best-covered symbol first for a phrase', () => {
-    const r = searchSymbols(graph, dir, 'resolve workspace dsn', 8);
+  it('ranks the best-covered symbol first for a phrase', async () => {
+    const r = await searchSymbols(graph, dir, 'resolve workspace dsn', 8);
     expect(r.matches[0] && 'name' in r.matches[0] && r.matches[0].name).toContain('resolveWorkspaceDsn');
   });
 
-  it('still returns the pivot hint when nothing matches at all', () => {
-    const r = searchSymbols(graph, dir, 'zzznope qqxyz', 8);
+  it('still returns the pivot hint when nothing matches at all', async () => {
+    const r = await searchSymbols(graph, dir, 'zzznope qqxyz', 8);
     expect(r.matches.length).toBe(0);
     expect(r.hint).toBeTruthy();
   });

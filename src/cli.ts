@@ -116,7 +116,7 @@ export function buildProgram(): Command {
             : '';
       return (
         `\nRun \`${cli}\` to scan + map the current folder, \`${cli} "<question>"\` to ask, ` +
-        `\`${cli} status\`/\`${cli} verify\` for state.\n` +
+        `\`${cli} status\` for state, \`${cli} build --verify\` to re-verify the map.\n` +
         `Drift: \`${cli} scan\` / \`${cli} report\`. Wire into your AI agent: \`${cli} install\`.\n` +
         `${aliasNote}Docs: https://vibgrate.com/help`
       );
