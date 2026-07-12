@@ -64,7 +64,7 @@ jobs:
       major_tag: ${{ steps.decide.outputs.major_tag }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.0
         with:
           # Need the parent commit so a push to main can diff package.json.
           fetch-depth: 0
@@ -137,7 +137,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.0
         with:
           fetch-depth: 0
 
