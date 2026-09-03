@@ -381,6 +381,27 @@ function formatExtended(ext: ExtendedScanResults): string[] {
     }
     lines.push('');
   }
+  // ── Database Schema (compact) ──
+  if (ext.databaseSchema) {
+    const ds = ext.databaseSchema;
+    lines.push(chalk.bold.underline('  Database Schema'));
+    const dsHead: string[] = [];
+    if (ds.providers.length > 0) dsHead.push(ds.providers.join(', '));
+    dsHead.push(`${ds.models.length} model${ds.models.length !== 1 ? 's' : ''}`);
+    dsHead.push(`${ds.enums.length} enum${ds.enums.length !== 1 ? 's' : ''}`);
+    lines.push(`    ${dsHead.join(' · ')}`);
+    const bySource = new Map<string, number>();
+    for (const m of ds.models) bySource.set(m.source, (bySource.get(m.source) ?? 0) + 1);
+    if (bySource.size > 1) {
+      const sourceSummary = [...bySource.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([s, n]) => `${s}: ${n}`).join(', ');
+      lines.push(`    Sources: ${sourceSummary}`);
+    }
+    if (ds.models.length > 0) {
+      const preview = ds.models.slice(0, 5).map((m) => m.name).join(', ');
+      lines.push(`    Models: ${chalk.white(preview)}${ds.models.length > 5 ? chalk.dim(` (+${ds.models.length - 5} more)`) : ''}`);
+    }
+    lines.push('');
+  }
   // ── Dependency Graph (compact) ──
   if (ext.dependencyGraph) {
     const dg = ext.dependencyGraph;
@@ -415,11 +436,74 @@ function formatArchitectureDiagram(arch: ArchitectureResult): string[] {
   lines.push('');
   lines.push(chalk.bold('  Archetype: ') + `${arch.archetype}` + chalk.dim(` (${Math.round(arch.archetypeConfidence * 100)}% confidence)`));
   lines.push(`  Files classified: ${arch.totalClassified}` + (arch.unclassified > 0 ? chalk.dim(` (${arch.unclassified} unclassified)`) : ''));
+  if (arch.folders && arch.folders.length > 0) {
+    lines.push(`  Folders classified: ${arch.folders.length}`);
+    for (const folder of arch.folders.slice(0, 12)) {
+      lines.push(`    ${folder.path}  ${folder.layer}  ${Math.round(folder.confidence * 100)}%  ${folder.fileCount} file${folder.fileCount !== 1 ? 's' : ''}`);
+    }
+    if (arch.folders.length > 12) {
+      lines.push(chalk.dim(`    + ${arch.folders.length - 12} more`));
+    }
+  }
+  if (arch.coverage) {
+    const pct = Math.round(arch.coverage.ratio * 100);
+    lines.push(
+      `  Coverage: ${pct}%  (${arch.coverage.classified} classified, ${arch.coverage.unclassified} unclassified)`,
+    );
+    const attributed = Object.entries(arch.coverage.bySource)
+      .filter(([, n]) => n > 0)
+      .sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]))
+      .map(([src, n]) => `${src} ${n}`);
+    if (attributed.length > 0) {
+      lines.push(chalk.dim(`    by source: ${attributed.join(', ')}`));
+    }
+  }
+  if (arch.unclassifiedFiles && arch.unclassifiedFiles.length > 0) {
+    const extra = arch.unclassified > arch.unclassifiedFiles.length ? ` of ${arch.unclassified}` : '';
+    lines.push(`  Unclassified source (sample): ${arch.unclassifiedFiles.length}${extra}`);
+  }
+  if (arch.unclassifiedFolders && arch.unclassifiedFolders.length > 0) {
+    // The shape of the miss: which directories the rule table cannot see.
+    lines.push('  Unclassified by folder:');
+    for (const folder of arch.unclassifiedFolders.slice(0, 8)) {
+      lines.push(`    ${String(folder.count).padStart(4)}  ${folder.path}`);
+    }
+    if (arch.unclassifiedFolders.length > 8) {
+      lines.push(chalk.dim(`    + ${arch.unclassifiedFolders.length - 8} more`));
+    }
+  }
   lines.push('');
   if (arch.layers.length > 0) {
     for (const layer of arch.layers) {
+      if (layer.fileCount === 0) continue;
       const risk = layer.riskLevel === 'none' ? chalk.dim('none') : layer.riskLevel === 'low' ? chalk.green('low') : layer.riskLevel === 'moderate' ? chalk.yellow('moderate') : chalk.red('high');
       lines.push(`    ${chalk.bold(layer.layer)}  ${layer.fileCount} file${layer.fileCount !== 1 ? 's' : ''}  drift ${scoreBar(layer.driftScore)}  risk ${risk}`);
+    }
+    lines.push('');
+  }
+  if (arch.violations && arch.violations.length > 0) {
+    const extra = arch.violationsCapped ? '+' : '';
+    const boundary = arch.violations.filter((v) => !v.rule.startsWith('graph-conflict:'));
+    const conflicts = arch.violations.filter((v) => v.rule.startsWith('graph-conflict:'));
+    if (boundary.length > 0) {
+      const cap = extra && conflicts.length === 0 ? extra : '';
+      lines.push(`  Boundary violations (${boundary.length}${cap})`);
+      for (const v of boundary.slice(0, 8)) {
+        lines.push(`    ${v.fromFile} → ${v.toFile}  ${v.rule}`);
+      }
+      if (boundary.length > 8) {
+        lines.push(chalk.dim(`    + ${boundary.length - 8} more`));
+      }
+    }
+    if (conflicts.length > 0) {
+      const cap = extra ? extra : '';
+      lines.push(`  Layer conflicts (${conflicts.length}${cap})`);
+      for (const v of conflicts.slice(0, 8)) {
+        lines.push(`    ${v.fromFile} → ${v.toFile}  ${v.rule}`);
+      }
+      if (conflicts.length > 8) {
+        lines.push(chalk.dim(`    + ${conflicts.length - 8} more`));
+      }
     }
     lines.push('');
   }

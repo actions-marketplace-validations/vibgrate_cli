@@ -124,6 +124,13 @@ export interface DependencyRow {
   currentSpec: string;
   resolvedVersion: string | null;
   latestStable: string | null;
+  /**
+   * Latest stable release that still satisfies `currentSpec` — the newest
+   * version an install alone could reach without editing the manifest. Null
+   * when the registry list is unavailable (offline) or nothing satisfies.
+   * Populated by scanners that resolve ranges (npm today); absent elsewhere.
+   */
+  latestSatisfying?: string | null;
   majorsBehind: number | null;
   drift: 'current' | 'minor-behind' | 'major-behind' | 'unknown';
   /** Declared license evidence (populated by ecosystem scanners). */
@@ -137,6 +144,21 @@ export interface DependencyRow {
   ageDays?: number | null;
   /** ageDays expressed in libyears (ageDays / 365.25). Null when unavailable. */
   libyears?: number | null;
+  /**
+   * The resolved major is past vendor support / registry-deprecated. Fires the
+   * driftscore-3.0 unsupported floor (per-dependency drift ≥ 70) — a stale-but-
+   * supported package is drift, but an unsupported one cannot read healthy.
+   * Populated by ecosystem scanners (e.g. the npm `deprecated` flag); absent
+   * when the scanner has no support signal.
+   */
+  unsupported?: boolean;
+  /**
+   * No release in ~24+ months ("no pulse") / registry-flagged abandoned. Fires
+   * the driftscore-3.0 abandoned floor (per-dependency drift ≥ 50). Distinct
+   * from `unsupported`: an abandoned package may still be a current version, but
+   * it has stopped moving. Populated from the latest release's age.
+   */
+  abandoned?: boolean;
 }
 
 // ── Detected framework ──
@@ -296,6 +318,39 @@ export interface DriftScore {
    * artifacts from CLIs predating this field will not carry it.
    */
   methodologyVersion?: string;
+  /**
+   * Provenance of the score (DRIFTSCORE-V3-SPEC §2.4): `estimated` means there
+   * were no release-date timestamps at all (version-only fallback), and is
+   * branded with a leading `~` by renderers. `verified` means time data was
+   * present — online OR from a dated snapshot. **Offline is not Estimated.**
+   * Optional: absent on artifacts from pre-v3 CLIs.
+   */
+  mode?: 'verified' | 'estimated';
+  /**
+   * driftscore-3.0 dependency-pillar detail, surfaced for explainability and the
+   * per-package breakdown (the IDE accordion, the dashboard). Present when there
+   * were scoreable dependencies.
+   */
+  dependencyDrift?: {
+    /** 95th-percentile per-dependency drift — the tail term that stops one
+     *  ancient dependency averaging into invisibility. */
+    p95: number;
+    /** Fraction (0–1) of scored deps at the unsupported/EOL floor. */
+    unsupportedShare: number;
+    /** Fraction (0–1) of scored deps that had release-date (Verified) data. */
+    coverage: number;
+    /** Worst offenders, ranked by drift (highest first), for the breakdown. */
+    top: {
+      package: string;
+      /** 0–100 per-dependency drift contribution. */
+      drift: number;
+      mode: 'verified' | 'estimated';
+      /** Hit the unsupported/EOL floor. */
+      unsupported: boolean;
+      /** Data-quality guards that fired (canary-latest, scheme-jump, …). */
+      flags: string[];
+    }[];
+  };
 }
 
 // ── Risk score (security & business risk — distinct from maintainability drift) ──
@@ -677,6 +732,18 @@ export interface ScanArtifact {
 
 // ── Reachability (vulnerable-symbol usage, local graph query) ──
 
+/**
+ * One code site where a vulnerable package/symbol is evidenced in the local
+ * graph query. File is always present; line is 1-based when a lexical hit
+ * was located. Function is best-effort enclosing symbol from the code map.
+ */
+export interface ReachabilitySite {
+  file: string;
+  line?: number | null;
+  symbol?: string | null;
+  function?: string | null;
+}
+
 /** One vulnerable-symbol reachability verdict from the local graph query. */
 export interface ScanReachabilityFinding {
   advisoryId: string;
@@ -686,8 +753,14 @@ export interface ScanReachabilityFinding {
   /** The vulnerable symbol checked. Absent for module-level verdicts. */
   symbol?: string;
   tier: ReachabilityTier;
-  /** Bounded evidence chain (importing files / symbols). */
+  /**
+   * Bounded evidence chain of importing / referencing files.
+   * When line is known, entries may be `path:line` for human display;
+   * prefer structured `sites` for machine consumers.
+   */
   callPath?: string[];
+  /** Structured evidence sites (file / line / symbol / enclosing function). */
+  sites?: ReachabilitySite[];
   /** One-line human-readable evidence. */
   evidence?: string;
   /** Confidence in the graph verdict (0–1). */
@@ -797,10 +870,21 @@ export interface ScanOptions {
   /**
    * Optional post-scoring step run inside the scan's progress bar, after findings
    * (e.g. building the local code map). Receives a progress reporter
-   * `(done, total, phase)` and returns a short detail string for the step.
-   * Fail-soft: a thrown error never fails the scan.
+   * `(done, total, phase)` and the in-progress `projects` / `solutions` /
+   * `extended` so architecture can be refined against the map *before*
+   * format / write. Fail-soft: a thrown error never fails the scan.
    */
-  postScan?: (report: (done: number, total: number, phase: string) => void) => Promise<string | void>;
+  postScan?: (
+    report: (done: number, total: number, phase: string) => void,
+    ctx: PostScanContext,
+  ) => Promise<string | void>;
+}
+
+/** In-progress scan objects handed to {@link ScanOptions.postScan}. */
+export interface PostScanContext {
+  projects: ProjectScan[];
+  solutions: SolutionScan[];
+  extended: ExtendedScanResults;
 }
 
 export interface InitOptions {
@@ -831,6 +915,23 @@ export interface ScannerToggle {
   enabled: boolean;
 }
 
+/**
+ * Per-field override of the default upload-compaction caps for the
+ * `databaseSchema` scanner (see `compactDatabaseSchema` in
+ * `utils/compact-artifact.ts` and DOCS.md § Database Schema). Any field left
+ * unset keeps its built-in default. Raising these only affects how much of
+ * the *local* scan result survives compaction before upload — the ingest API
+ * enforces its own fixed hard ceiling on top, regardless of what's configured
+ * here, so a payload can never grow unbounded even from a misconfigured or
+ * non-CLI client.
+ */
+export interface DatabaseSchemaUploadCaps {
+  maxModels?: number;
+  maxFieldsPerModel?: number;
+  maxFilesPerModel?: number;
+  maxFilesScanned?: number;
+}
+
 export interface ScannersConfig {
   platformMatrix?: ScannerToggle;
   dependencyRisk?: ScannerToggle;
@@ -844,6 +945,7 @@ export interface ScannersConfig {
   serviceDependencies?: ScannerToggle;
   architecture?: ScannerToggle;
   codeQuality?: ScannerToggle;
+  databaseSchema?: ScannerToggle & DatabaseSchemaUploadCaps;
   uiPurpose?: ScannerToggle;
   runtimeConfiguration?: ScannerToggle;
   dataStores?: ScannerToggle;
@@ -1067,7 +1169,22 @@ export type ProjectArchetype =
   | 'library'
   | 'cli'
   | 'monorepo'
+  | 'spring'
+  | 'aspnet'
+  | 'django'
+  | 'fastapi'
+  | 'rails'
+  | 'laravel'
+  | 'phoenix'
+  | 'go-service'
   | 'unknown';
+
+/**
+ * Shape of the scanned workspace — not a project archetype.
+ * `monorepo` stays on {@link ProjectArchetype} so old artifacts validate,
+ * but new scans never emit `archetype: 'monorepo'`.
+ */
+export type WorkspaceShape = 'single' | 'monorepo' | 'polyglot-platform';
 
 /** Architectural layer classification */
 export type ArchitectureLayer =
@@ -1082,6 +1199,18 @@ export type ArchitectureLayer =
   | 'testing'
   | 'shared';
 
+/**
+ * Finer than {@link ArchitectureLayer}. Omit when unknown (absent ≠ empty).
+ * Syntax confirmation of a path/folder prior — not a second layer taxonomy.
+ */
+export type ArchitectureFileRole =
+  | 'controller'
+  | 'service'
+  | 'repository'
+  | 'entity'
+  | 'handler'
+  | 'router';
+
 /** A single file classified into a layer */
 export interface LayerClassification {
   /** Relative path from project root */
@@ -1091,6 +1220,22 @@ export interface LayerClassification {
   /** Confidence of classification (0–1) */
   confidence: number;
   /** Top signals that contributed to classification */
+  signals: string[];
+  /** Confirmed syntactic role. Omit when the AST pass did not hit. */
+  role?: ArchitectureFileRole;
+  /** Which stage decided this layer. Feeds `ArchitectureCoverage.bySource`. */
+  source?: ArchitectureCoverageSource;
+}
+
+/** A directory labelled from its classified children, or inherited from an ancestor. */
+export interface FolderClassification {
+  /** Relative directory path from the result root (`.` for the tree root) */
+  path: string;
+  layer: ArchitectureLayer;
+  /** Winning-layer share of direct classified children, or the inherited ancestor's share */
+  confidence: number;
+  /** Classified files under this directory that share `layer` */
+  fileCount: number;
   signals: string[];
 }
 
@@ -1110,6 +1255,12 @@ export interface LayerSummary {
   services: ServiceDependencyItem[];
   /** Packages referenced in this layer with their drift status */
   packages: LayerPackageRef[];
+  /**
+   * Sample of files (relative to project root) classified into this layer,
+   * capped at a small count for display — not every classified file, just
+   * enough for a client to link out to representative examples.
+   */
+  files: string[];
 }
 
 /** Package reference within a layer */
@@ -1121,7 +1272,133 @@ export interface LayerPackageRef {
   drift: 'current' | 'minor-behind' | 'major-behind' | 'unknown';
 }
 
+/** Honest architecture-engine support level (0 = discovered only, 4 = full graph). */
+export type ArchitectureSupportLevel = 0 | 1 | 2 | 3 | 4;
+
+/** Dimension a knowledge pack may vote on. Orthogonal — do not collapse into archetype. */
+export type ArchitectureEvidenceDimension =
+  | 'language'
+  | 'projectKind'
+  | 'framework'
+  | 'platform'
+  | 'buildSystem'
+  | 'artifactKind'
+  | 'structure'
+  | 'layer'
+  | 'role';
+
+/** One pack contribution. `signals` is stable-sorted. Fusion uses the uncapped set. */
+export interface ArchitectureEvidence {
+  packId: string;
+  dimension: ArchitectureEvidenceDimension;
+  value: string;
+  confidence: number;
+  signals: string[];
+}
+
+/** Cross-project link recorded on the scan artifact (not a graph-schema bump). */
+export type ArchitectureWorkspaceEdgeKind =
+  | 'implements-contract'
+  | 'generates'
+  | 'deploys'
+  | 'provisions'
+  | 'depends_on';
+
+export interface ArchitectureWorkspaceEdge {
+  kind: ArchitectureWorkspaceEdgeKind;
+  /** {@link ProjectScan.path} of the source project */
+  fromProject: string;
+  toProject: string;
+  fromFile?: string;
+  toFile?: string;
+  confidence: number;
+}
+
+/** Intra-project layer / neighbourhood finding. Omit the array when there is no graph. */
+export interface ArchitectureViolation {
+  fromFile: string;
+  toFile: string;
+  fromLayer: ArchitectureLayer;
+  toLayer: ArchitectureLayer;
+  edgeKind: string;
+  rule: string;
+  confidence: number;
+}
+
+/** Thin structure inference (primary + characteristics). Omit when not inferred. */
+export interface ArchitectureStructure {
+  primary: string;
+  characteristics: string[];
+  confidence: number;
+}
+
+/**
+ * Declared-architecture placeholder (ArchUnit, Nx boundaries, …).
+ * Schema only in this release — omitted until a later wave populates it.
+ */
+export interface ArchitectureDeclared {
+  rules?: string[];
+}
+
+/**
+ * Observed-architecture placeholder (graph-derived structure).
+ * Schema only in this release — omitted until a later wave populates it.
+ */
+export interface ArchitectureObserved {
+  structure?: string;
+}
+
 /** Full architecture detection result */
+/**
+ * Which stage of the pipeline assigned a file's layer. Attribution follows the
+ * stage that *decided* the layer, not one that merely agreed with it:
+ * `graph-confirm` / `ast-confirm` raise confidence without changing the source.
+ * `declared` is reserved for Wave B (declared-rule selectors); it is a valid
+ * key that stays 0 until that lands, so the shape never changes under callers.
+ */
+export type ArchitectureCoverageSource =
+  | 'path'
+  | 'suffix'
+  | 'pascal'
+  | 'folder-inherit'
+  | 'graph'
+  | 'ast'
+  | 'declared';
+
+/**
+ * Honest classification coverage. `classified` and `unclassified` mirror
+ * `totalClassified` / `unclassified` on the same result — they are emitted
+ * together so an instrumentation drift between the counters and the
+ * attribution is detectable rather than silent.
+ */
+export interface ArchitectureCoverage {
+  classified: number;
+  unclassified: number;
+  /**
+   * `classified / (classified + unclassified)`, rounded to 4 decimal places so
+   * the serialized artifact is stable. 0 when nothing was walked (an empty
+   * denominator is not 100% coverage).
+   */
+  ratio: number;
+  /** Every key always present; sums to `classified`. */
+  bySource: Record<ArchitectureCoverageSource, number>;
+}
+
+/**
+ * Where the unclassified source actually is. `unclassifiedFiles` is a flat
+ * 40-path sample and cannot show the shape of the miss; this groups the same
+ * population by directory so a folder holding 76 unclassified files is visible
+ * as one row instead of crowding out the sample.
+ */
+export interface ArchitectureUnclassifiedFolder {
+  /** Directory path relative to the result root (`.` for the tree root). */
+  path: string;
+  /** Unclassified source files directly in this directory. */
+  count: number;
+  /** Sorted sample of those files. Capped. */
+  sampleFiles: string[];
+}
+
 export interface ArchitectureResult {
   /** Detected project archetype */
   archetype: ProjectArchetype;
@@ -1133,6 +1410,77 @@ export interface ArchitectureResult {
   totalClassified: number;
   /** Files that could not be classified */
   unclassified: number;
+  /**
+   * Directories labelled from classified children or inherited from an ancestor.
+   * Sorted by path. Omit when none (absent ≠ []).
+   */
+  folders?: FolderClassification[];
+  /**
+   * Sample of still-unclassified source paths after folder inheritance.
+   * Cap 40, sorted. Omit when none (absent ≠ []).
+   */
+  unclassifiedFiles?: string[];
+  /**
+   * File-level classifications that carry a confirmed AST role.
+   * Cap 64, sorted by filePath. Omit when none (absent ≠ []).
+   */
+  classified?: LayerClassification[];
+  /**
+   * Workspace composition. Set on the workspace / solution aggregate.
+   * Omit on a single-project result when the caller did not ask for shape
+   * (absent ≠ `'single'`).
+   */
+  workspaceShape?: WorkspaceShape;
+  /** Honest support level. 0 is a real outcome (discovered only), not "missing". */
+  supportLevel?: ArchitectureSupportLevel;
+  /** Every pack that contributed evidence, localeCompare-sorted. */
+  packIds?: string[];
+  projectKind?: string;
+  artifactKind?: string;
+  /** Contracts only (openapi, protobuf, graphql, …). */
+  contractKind?: string;
+  semanticRole?: string;
+  /** Payload sample of fused evidence — capped (see evidenceCapped). */
+  evidence?: ArchitectureEvidence[];
+  /** Present only when the evidence sample dropped items. Absent ≠ false. */
+  evidenceCapped?: true;
+  /** Cross-project links. Omit when none (absent ≠ []). */
+  workspaceEdges?: ArchitectureWorkspaceEdge[];
+  /** Present only when the workspace-edge sample dropped items. Absent ≠ false. */
+  workspaceEdgesCapped?: true;
+  /**
+   * Intra-project boundary / neighbourhood findings.
+   * Omit when there is no graph (`--no-graph`, map failed, `--max-privacy`).
+   * Present (possibly `[]`) only after graph confirmation ran.
+   */
+  violations?: ArchitectureViolation[];
+  /** Present only when the violation sample dropped items. Absent ≠ false. */
+  violationsCapped?: true;
+  /** Which boundary profile was applied during graph confirmation. */
+  boundaryProfile?: string;
+  /** Thin structure inference. Omit when not inferred. */
+  structure?: ArchitectureStructure;
+  /** Present only when generated stubs/clients were detected. Absent ≠ false. */
+  generated?: true;
+  generatedBy?: string;
+  /** Repo-relative path of the source contract, when known. */
+  sourceContract?: string;
+  /**
+   * Classification coverage and its attribution. Omit when no source files
+   * were walked (contract / IaC projects); absent is not "0% covered".
+   */
+  coverage?: ArchitectureCoverage;
+  /**
+   * Unclassified source grouped by directory, sorted by count desc then path.
+   * Cap 40. Omit when none (absent ≠ []).
+   */
+  unclassifiedFolders?: ArchitectureUnclassifiedFolder[];
+  /** Present only when the unclassified-folder sample dropped directories. */
+  unclassifiedFoldersCapped?: true;
+  /** Placeholder — do not emit until declared-vs-observed lands. */
+  declared?: ArchitectureDeclared;
+  /** Placeholder — do not emit until declared-vs-observed lands. */
+  observed?: ArchitectureObserved;
 }
 
 export interface GodFile {
@@ -1151,6 +1499,85 @@ export interface CodeQualityResult {
   godFiles: GodFile[];
   circularDependencies: number;
   deadCodePercent: number;
+}
+
+/**
+ * Which scanner produced a {@link DatabaseModel}. Models are never merged or
+ * deduped by name *across* sources — a `users` table found in a raw SQL
+ * migration and a `User` Prisma model are not assumed to be the same thing,
+ * even when their names coincide. Each source keeps its own dedup pass.
+ */
+export type DatabaseModelSource = 'prisma' | 'sql-migration' | 'sqlproj' | 'drizzle' | 'typeorm';
+
+/** A single field/column on a {@link DatabaseModel}. Never carries attribute
+ * *values* (e.g. Prisma's `@default(...)`, a SQL `DEFAULT ...` value, or a
+ * decorator's non-name arguments) — only structural facts. */
+export interface DatabaseField {
+  name: string;
+  /** Base type name/keyword as detected by the source parser, e.g. `String`,
+   *  `Post` (Prisma), `VARCHAR(255)` (SQL), `text` (Drizzle builder name), or
+   *  the declared TS type (TypeORM). Best-effort, never evaluated. */
+  type: string;
+  /** True when the field type is a list/array (or a `*ToMany` relation). */
+  isList: boolean;
+  /** True when the field type is optional/nullable. */
+  isOptional: boolean;
+  /** True when the type is another model/table, or an explicit relation
+   *  annotation/decorator/`REFERENCES` clause is present. */
+  isRelation: boolean;
+  /** True when the field is (part of) the primary key. */
+  isId: boolean;
+  /** True when the field carries a uniqueness constraint. */
+  isUnique: boolean;
+}
+
+/** A database model — a Prisma `model` block, a SQL `CREATE TABLE`, a Drizzle
+ * `pgTable`/`mysqlTable`/`sqliteTable` call, or a TypeORM `@Entity` class. */
+export interface DatabaseModel {
+  name: string;
+  fields: DatabaseField[];
+  /** Which scanner produced this model — see {@link DatabaseModelSource}. */
+  source: DatabaseModelSource;
+  /** File(s) (relative to rootDir) this model was extracted from. */
+  files: string[];
+}
+
+/** A Prisma `enum` block. */
+export interface DatabaseEnum {
+  name: string;
+  values: string[];
+}
+
+/** Per-project breakdown of database-schema files/models/enums, across all sources. */
+export interface DatabaseSchemaProjectSummary {
+  /** Project path (relative to rootDir), matching `ProjectScan.path`. */
+  project: string;
+  /** Schema/migration/entity files attributed to this project, relative to rootDir. */
+  filesScanned: string[];
+  /** Model names defined within this project's files (any source). */
+  models: string[];
+  /** Enum names defined within this project's files (Prisma only). */
+  enums: string[];
+}
+
+/**
+ * Structured, deterministic database-schema scan result, merged across all
+ * supported sources (Prisma, raw SQL migrations, SQL Server database
+ * projects, Drizzle, TypeORM). Only structural facts — model/table names,
+ * field/column names/types, relation/list/optional/id/unique flags, and enum
+ * names/values. Never a raw source line, connection string, or credential —
+ * see the doc comment at the top of `advanced-analysis.ts` and
+ * `scanners/database-schema.ts` (in the public CLI package) for why.
+ */
+export interface DatabaseSchemaResult {
+  /** Datasource providers detected (e.g. `postgresql`, `mysql`, `sqlite`). Never includes the `url` value. */
+  providers: string[];
+  models: DatabaseModel[];
+  enums: DatabaseEnum[];
+  /** All schema/migration/entity files scanned (any source), relative to rootDir. */
+  filesScanned: string[];
+  /** Per-project breakdown. */
+  projects: DatabaseSchemaProjectSummary[];
 }
 
 export interface UiPurposeEvidenceItem {
@@ -1353,6 +1780,7 @@ export interface ExtendedScanResults {
   serviceDependencies?: ServiceDependenciesResult;
   architecture?: ArchitectureResult;
   codeQuality?: CodeQualityResult;
+  databaseSchema?: DatabaseSchemaResult;
   uiPurpose?: UiPurposeResult;
   runtimeConfiguration?: RuntimeConfigurationResult;
   dataStores?: DataStoresResult;

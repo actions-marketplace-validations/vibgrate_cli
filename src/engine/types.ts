@@ -32,6 +32,14 @@ export interface RawHeritage {
   kind: 'extends' | 'implements';
 }
 
+/** A type used as a constructor parameter or field's declared type — a
+ * structural dependency (e.g. Spring constructor/field injection) rather than
+ * an invocation. Resolved to a `references` edge, not a `call` edge. */
+export interface RawTypeRef {
+  name: string; // short type name
+  byte: number; // position (for enclosing-def lookup)
+}
+
 export interface RawGuard {
   expr: string; // the guard/assert expression text (bounded)
   line: number; // 1-based line (mapped to the enclosing def for invariant facts)
@@ -47,7 +55,27 @@ export interface FileParse {
   calls: RawCall[];
   imports: RawImport[];
   heritage: RawHeritage[];
+  typeRefs: RawTypeRef[];
   guards: RawGuard[];
+  /**
+   * Namespaces this file declares (C#/package-scoped langs). Used to resolve a
+   * cross-directory reference when the caller `using`-imports the namespace the
+   * target is declared in — the correct scoping rule for C#, where a namespace
+   * is decoupled from the directory (unlike Java/Go, where package == dir).
+   * Empty/absent for languages with no namespace query.
+   */
+  namespaces?: string[];
+  /**
+   * Architecture role hits extracted from the same tree as defs/calls.
+   * Omit when none (absent ≠ []).
+   */
+  roles?: Array<{
+    role: 'controller' | 'service' | 'repository' | 'entity' | 'handler' | 'router';
+    layer: 'routing' | 'middleware' | 'services' | 'domain' | 'data-access' | 'infrastructure' | 'presentation' | 'config' | 'testing' | 'shared';
+    confidence: number;
+    signal: string;
+    packId: string;
+  }>;
   /** Non-fatal issues (e.g. a query that failed to compile for this grammar). */
   warnings?: string[];
 }

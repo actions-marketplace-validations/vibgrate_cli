@@ -92,6 +92,12 @@ export interface CoreScanContext {
  */
 export type AdvancedScanHook = (ctx: CoreScanContext) => Promise<void>;
 
+/** Capture wall-clock even when the caller awaits the scanners in a fixed order. */
+function timePromise<T>(promise: Promise<T>): Promise<{ value: T; durationMs: number }> {
+  const started = Date.now();
+  return promise.then((value) => ({ value, durationMs: Date.now() - started }));
+}
+
 interface ParsedSolutionFile {
   path: string;
   name: string;
@@ -263,8 +269,37 @@ export async function runCoreScan(
   }
   progress.completeStep('walk', `${treeCount.totalFiles.toLocaleString()} files indexed`);
 
+  // ── Per-ecosystem fact collection ──
+  // Every ecosystem scanner starts NOW, concurrently: they are independent,
+  // I/O-bound (file reads + registry lookups), and registry traffic is already
+  // globally capped by the shared Semaphore — so on a polyglot repo the wall
+  // clock is the slowest scanner, not the sum of all of them. Results are then
+  // folded in the fixed order below so progress steps, dedup precedence, and
+  // serialized output stay byte-deterministic.
+  //
+  // A wrapping "Scanning projects" step is started first so the (historically
+  // invisible) registry-lookup wait has a progress line and a recorded duration.
+  progress.insertStepBefore('drift', { id: 'ecosystems', label: 'Scanning projects', weight: 8 });
+  progress.startStep('ecosystems');
+
+  const nodeProjectsP = timePromise(scanNodeProjects(rootDir, npmCache, fileCache, projectScanTimeoutMs, runtimeCatalog));
+  const dotnetProjectsP = timePromise(scanDotnetProjects(rootDir, nugetCache, fileCache, projectScanTimeoutMs, runtimeCatalog));
+  const pythonProjectsP = timePromise(scanPythonProjects(rootDir, pypiCache, fileCache, projectScanTimeoutMs, runtimeCatalog));
+  const javaProjectsP = timePromise(scanJavaProjects(rootDir, mavenCache, fileCache, projectScanTimeoutMs, runtimeCatalog));
+  const rubyProjectsP = timePromise(scanRubyProjects(rootDir, rubygemsCache, fileCache, projectScanTimeoutMs, runtimeCatalog));
+  const swiftProjectsP = timePromise(scanSwiftProjects(rootDir, swiftCache, fileCache, projectScanTimeoutMs));
+  const goProjectsP = timePromise(scanGoProjects(rootDir, goCache, fileCache, projectScanTimeoutMs, runtimeCatalog));
+  const rustProjectsP = timePromise(scanRustProjects(rootDir, cargoCache, fileCache, projectScanTimeoutMs));
+  const phpProjectsP = timePromise(scanPhpProjects(rootDir, composerCache, fileCache, projectScanTimeoutMs));
+  const dartProjectsP = timePromise(scanDartProjects(rootDir, pubCache, fileCache, projectScanTimeoutMs));
+  const elixirProjectsP = timePromise(scanElixirProjects(rootDir, packageManifest, fileCache, projectScanTimeoutMs, offlineMode));
+  const dockerProjectsP = timePromise(scanDockerProjects(rootDir, packageManifest, fileCache, projectScanTimeoutMs, offlineMode));
+  const helmProjectsP = timePromise(scanHelmProjects(rootDir, packageManifest, fileCache, projectScanTimeoutMs, offlineMode));
+  const terraformProjectsP = timePromise(scanTerraformProjects(rootDir, packageManifest, fileCache, projectScanTimeoutMs, offlineMode));
+  const polyglotProjectsP = timePromise(scanPolyglotProjects(rootDir, fileCache));
+
   // ── Step: Node projects ──
-  const nodeProjects = await scanNodeProjects(rootDir, npmCache, fileCache, projectScanTimeoutMs, runtimeCatalog);
+  const { value: nodeProjects, durationMs: nodeMs } = await nodeProjectsP;
   if (nodeProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'node', label: 'Found Node projects', weight: 4 });
     progress.startStep('node');
@@ -274,11 +309,11 @@ export async function runCoreScan(
     }
     filesScanned += nodeProjects.length;
     progress.addProjects(nodeProjects.length);
-    progress.completeStep('node', `${nodeProjects.length} project${nodeProjects.length !== 1 ? 's' : ''}`, nodeProjects.length);
+    progress.completeStep('node', `${nodeProjects.length} project${nodeProjects.length !== 1 ? 's' : ''}`, nodeProjects.length, nodeMs);
   }
 
   // ── Step: .NET projects ──
-  const dotnetProjects = await scanDotnetProjects(rootDir, nugetCache, fileCache, projectScanTimeoutMs, runtimeCatalog);
+  const { value: dotnetProjects, durationMs: dotnetMs } = await dotnetProjectsP;
   if (dotnetProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'dotnet', label: 'Found .NET projects', weight: 2 });
     progress.startStep('dotnet');
@@ -288,11 +323,11 @@ export async function runCoreScan(
     }
     filesScanned += dotnetProjects.length;
     progress.addProjects(dotnetProjects.length);
-    progress.completeStep('dotnet', `${dotnetProjects.length} project${dotnetProjects.length !== 1 ? 's' : ''}`, dotnetProjects.length);
+    progress.completeStep('dotnet', `${dotnetProjects.length} project${dotnetProjects.length !== 1 ? 's' : ''}`, dotnetProjects.length, dotnetMs);
   }
 
   // ── Step: Python projects ──
-  const pythonProjects = await scanPythonProjects(rootDir, pypiCache, fileCache, projectScanTimeoutMs, runtimeCatalog);
+  const { value: pythonProjects, durationMs: pythonMs } = await pythonProjectsP;
   if (pythonProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'python', label: 'Found Python projects', weight: 3 });
     progress.startStep('python');
@@ -302,11 +337,11 @@ export async function runCoreScan(
     }
     filesScanned += pythonProjects.length;
     progress.addProjects(pythonProjects.length);
-    progress.completeStep('python', `${pythonProjects.length} project${pythonProjects.length !== 1 ? 's' : ''}`, pythonProjects.length);
+    progress.completeStep('python', `${pythonProjects.length} project${pythonProjects.length !== 1 ? 's' : ''}`, pythonProjects.length, pythonMs);
   }
 
   // ── Step: Java projects ──
-  const javaProjects = await scanJavaProjects(rootDir, mavenCache, fileCache, projectScanTimeoutMs, runtimeCatalog);
+  const { value: javaProjects, durationMs: javaMs } = await javaProjectsP;
   if (javaProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'java', label: 'Found Java projects', weight: 3 });
     progress.startStep('java');
@@ -316,11 +351,11 @@ export async function runCoreScan(
     }
     filesScanned += javaProjects.length;
     progress.addProjects(javaProjects.length);
-    progress.completeStep('java', `${javaProjects.length} project${javaProjects.length !== 1 ? 's' : ''}`, javaProjects.length);
+    progress.completeStep('java', `${javaProjects.length} project${javaProjects.length !== 1 ? 's' : ''}`, javaProjects.length, javaMs);
   }
 
   // ── Step: Ruby projects ──
-  const rubyProjects = await scanRubyProjects(rootDir, rubygemsCache, fileCache, projectScanTimeoutMs, runtimeCatalog);
+  const { value: rubyProjects, durationMs: rubyMs } = await rubyProjectsP;
   if (rubyProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'ruby', label: 'Found Ruby projects', weight: 2 });
     progress.startStep('ruby');
@@ -330,11 +365,11 @@ export async function runCoreScan(
     }
     filesScanned += rubyProjects.length;
     progress.addProjects(rubyProjects.length);
-    progress.completeStep('ruby', `${rubyProjects.length} project${rubyProjects.length !== 1 ? 's' : ''}`, rubyProjects.length);
+    progress.completeStep('ruby', `${rubyProjects.length} project${rubyProjects.length !== 1 ? 's' : ''}`, rubyProjects.length, rubyMs);
   }
 
   // ── Step: Swift projects ──
-  const swiftProjects = await scanSwiftProjects(rootDir, swiftCache, fileCache, projectScanTimeoutMs);
+  const { value: swiftProjects, durationMs: swiftMs } = await swiftProjectsP;
   if (swiftProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'swift', label: 'Found Swift projects', weight: 2 });
     progress.startStep('swift');
@@ -344,11 +379,11 @@ export async function runCoreScan(
     }
     filesScanned += swiftProjects.length;
     progress.addProjects(swiftProjects.length);
-    progress.completeStep('swift', `${swiftProjects.length} project${swiftProjects.length !== 1 ? 's' : ''}`, swiftProjects.length);
+    progress.completeStep('swift', `${swiftProjects.length} project${swiftProjects.length !== 1 ? 's' : ''}`, swiftProjects.length, swiftMs);
   }
 
   // ── Step: Go projects ──
-  const goProjects = await scanGoProjects(rootDir, goCache, fileCache, projectScanTimeoutMs, runtimeCatalog);
+  const { value: goProjects, durationMs: goMs } = await goProjectsP;
   if (goProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'go', label: 'Found Go projects', weight: 2 });
     progress.startStep('go');
@@ -358,11 +393,11 @@ export async function runCoreScan(
     }
     filesScanned += goProjects.length;
     progress.addProjects(goProjects.length);
-    progress.completeStep('go', `${goProjects.length} project${goProjects.length !== 1 ? 's' : ''}`, goProjects.length);
+    progress.completeStep('go', `${goProjects.length} project${goProjects.length !== 1 ? 's' : ''}`, goProjects.length, goMs);
   }
 
   // ── Step: Rust projects ──
-  const rustProjects = await scanRustProjects(rootDir, cargoCache, fileCache, projectScanTimeoutMs);
+  const { value: rustProjects, durationMs: rustMs } = await rustProjectsP;
   if (rustProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'rust', label: 'Found Rust projects', weight: 2 });
     progress.startStep('rust');
@@ -372,11 +407,11 @@ export async function runCoreScan(
     }
     filesScanned += rustProjects.length;
     progress.addProjects(rustProjects.length);
-    progress.completeStep('rust', `${rustProjects.length} project${rustProjects.length !== 1 ? 's' : ''}`, rustProjects.length);
+    progress.completeStep('rust', `${rustProjects.length} project${rustProjects.length !== 1 ? 's' : ''}`, rustProjects.length, rustMs);
   }
 
   // ── Step: PHP projects ──
-  const phpProjects = await scanPhpProjects(rootDir, composerCache, fileCache, projectScanTimeoutMs);
+  const { value: phpProjects, durationMs: phpMs } = await phpProjectsP;
   if (phpProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'php', label: 'Found PHP projects', weight: 2 });
     progress.startStep('php');
@@ -386,11 +421,11 @@ export async function runCoreScan(
     }
     filesScanned += phpProjects.length;
     progress.addProjects(phpProjects.length);
-    progress.completeStep('php', `${phpProjects.length} project${phpProjects.length !== 1 ? 's' : ''}`, phpProjects.length);
+    progress.completeStep('php', `${phpProjects.length} project${phpProjects.length !== 1 ? 's' : ''}`, phpProjects.length, phpMs);
   }
 
   // ── Step: Dart projects ──
-  const dartProjects = await scanDartProjects(rootDir, pubCache, fileCache, projectScanTimeoutMs);
+  const { value: dartProjects, durationMs: dartMs } = await dartProjectsP;
   if (dartProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'dart', label: 'Found Dart projects', weight: 2 });
     progress.startStep('dart');
@@ -400,11 +435,11 @@ export async function runCoreScan(
     }
     filesScanned += dartProjects.length;
     progress.addProjects(dartProjects.length);
-    progress.completeStep('dart', `${dartProjects.length} project${dartProjects.length !== 1 ? 's' : ''}`, dartProjects.length);
+    progress.completeStep('dart', `${dartProjects.length} project${dartProjects.length !== 1 ? 's' : ''}`, dartProjects.length, dartMs);
   }
 
   // ── Step: Elixir projects ──
-  const elixirProjects = await scanElixirProjects(rootDir, packageManifest, fileCache, projectScanTimeoutMs, offlineMode);
+  const { value: elixirProjects, durationMs: elixirMs } = await elixirProjectsP;
   if (elixirProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'elixir', label: 'Found Elixir projects', weight: 2 });
     progress.startStep('elixir');
@@ -414,11 +449,11 @@ export async function runCoreScan(
     }
     filesScanned += elixirProjects.length;
     progress.addProjects(elixirProjects.length);
-    progress.completeStep('elixir', `${elixirProjects.length} project${elixirProjects.length !== 1 ? 's' : ''}`, elixirProjects.length);
+    progress.completeStep('elixir', `${elixirProjects.length} project${elixirProjects.length !== 1 ? 's' : ''}`, elixirProjects.length, elixirMs);
   }
 
   // ── Step: Docker images ──
-  const dockerProjects = await scanDockerProjects(rootDir, packageManifest, fileCache, projectScanTimeoutMs, offlineMode);
+  const { value: dockerProjects, durationMs: dockerMs } = await dockerProjectsP;
   if (dockerProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'docker', label: 'Found Docker images', weight: 2 });
     progress.startStep('docker');
@@ -427,11 +462,11 @@ export async function runCoreScan(
     }
     filesScanned += dockerProjects.length;
     progress.addProjects(dockerProjects.length);
-    progress.completeStep('docker', `${dockerProjects.length} project${dockerProjects.length !== 1 ? 's' : ''}`, dockerProjects.length);
+    progress.completeStep('docker', `${dockerProjects.length} project${dockerProjects.length !== 1 ? 's' : ''}`, dockerProjects.length, dockerMs);
   }
 
   // ── Step: Helm charts ──
-  const helmProjects = await scanHelmProjects(rootDir, packageManifest, fileCache, projectScanTimeoutMs, offlineMode);
+  const { value: helmProjects, durationMs: helmMs } = await helmProjectsP;
   if (helmProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'helm', label: 'Found Helm charts', weight: 2 });
     progress.startStep('helm');
@@ -441,11 +476,11 @@ export async function runCoreScan(
     }
     filesScanned += helmProjects.length;
     progress.addProjects(helmProjects.length);
-    progress.completeStep('helm', `${helmProjects.length} project${helmProjects.length !== 1 ? 's' : ''}`, helmProjects.length);
+    progress.completeStep('helm', `${helmProjects.length} project${helmProjects.length !== 1 ? 's' : ''}`, helmProjects.length, helmMs);
   }
 
   // ── Step: Terraform configs ──
-  const terraformProjects = await scanTerraformProjects(rootDir, packageManifest, fileCache, projectScanTimeoutMs, offlineMode);
+  const { value: terraformProjects, durationMs: terraformMs } = await terraformProjectsP;
   if (terraformProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'terraform', label: 'Found Terraform configs', weight: 2 });
     progress.startStep('terraform');
@@ -454,11 +489,11 @@ export async function runCoreScan(
     }
     filesScanned += terraformProjects.length;
     progress.addProjects(terraformProjects.length);
-    progress.completeStep('terraform', `${terraformProjects.length} project${terraformProjects.length !== 1 ? 's' : ''}`, terraformProjects.length);
+    progress.completeStep('terraform', `${terraformProjects.length} project${terraformProjects.length !== 1 ? 's' : ''}`, terraformProjects.length, terraformMs);
   }
 
   // ── Step: Additional language projects ──
-  const polyglotProjects = await scanPolyglotProjects(rootDir, fileCache);
+  const { value: polyglotProjects, durationMs: polyglotMs } = await polyglotProjectsP;
   if (polyglotProjects.length > 0) {
     progress.insertStepBefore('drift', { id: 'polyglot', label: 'Found additional language projects', weight: 2 });
     progress.startStep('polyglot');
@@ -468,8 +503,19 @@ export async function runCoreScan(
     }
     filesScanned += polyglotProjects.length;
     progress.addProjects(polyglotProjects.length);
-    progress.completeStep('polyglot', `${polyglotProjects.length} project${polyglotProjects.length !== 1 ? 's' : ''}`, polyglotProjects.length);
+    progress.completeStep('polyglot', `${polyglotProjects.length} project${polyglotProjects.length !== 1 ? 's' : ''}`, polyglotProjects.length, polyglotMs);
   }
+
+  const ecosystemProjectCount =
+    nodeProjects.length + dotnetProjects.length + pythonProjects.length + javaProjects.length
+    + rubyProjects.length + swiftProjects.length + goProjects.length + rustProjects.length
+    + phpProjects.length + dartProjects.length + elixirProjects.length + dockerProjects.length
+    + helmProjects.length + terraformProjects.length + polyglotProjects.length;
+  progress.completeStep(
+    'ecosystems',
+    `${ecosystemProjectCount} project${ecosystemProjectCount !== 1 ? 's' : ''}`,
+    ecosystemProjectCount,
+  );
 
   // Deduplicate projects by path. Infrastructure overlays (a Dockerfile,
   // Helm chart, or Terraform config living inside a code project's
@@ -693,7 +739,10 @@ export async function runCoreScan(
   if (opts.postScan) {
     progress.startStep('map');
     try {
-      const detail = await opts.postScan((done, total, phase) => progress.updateStepProgress('map', done, total, phase));
+      const detail = await opts.postScan(
+        (done, total, phase) => progress.updateStepProgress('map', done, total, phase),
+        { projects: allProjects, solutions, extended },
+      );
       progress.completeStep('map', detail || 'done');
     } catch {
       progress.completeStep('map', 'skipped (map build failed)');

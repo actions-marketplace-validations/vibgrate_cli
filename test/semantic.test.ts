@@ -33,10 +33,14 @@ beforeAll(async () => {
 });
 afterAll(() => cleanup(dir));
 
-describe('lexical morphology (zero-dep, always on)', () => {
-  it('matches "authentication" against authenticate via shared-prefix fuzzing', () => {
+describe('mechanical lexical matching (module-less fallback)', () => {
+  it('word-form fuzzing is the relevance module\'s job — mechanically, "authentication" is an honest miss', () => {
+    // The shared-prefix morphology that bridged "authentication" →
+    // `authenticate` moved into the relevance module (gated in that
+    // package); the mechanical fallback matches names and parts exactly.
     const r = queryGraph(graph, 'authentication');
-    expect(r.matches.map((m) => m.node.name)).toContain('authenticate');
+    expect(r.matches.map((m) => m.node.name)).not.toContain('authenticate');
+    expect(queryGraph(graph, 'authenticate').matches.map((m) => m.node.name)).toContain('authenticate');
   });
 
   it('does not fuzzy-match unrelated short overlaps', () => {
@@ -94,12 +98,78 @@ describe('semantic hybrid (stub embedder)', () => {
     expect(cosine([1, 0, 0], [1, 0, 0])).toBeCloseTo(1);
     expect(cosine([1, 0, 0], [0, 1, 0])).toBe(0);
   });
+
+  it('RRF: agreement across both signals outranks a single-signal outlier', async () => {
+    const embedder = stubEmbedder();
+    const targets = graph.nodes.filter((n) => n.kind !== 'file' && n.kind !== 'external');
+    const vecs = await embedder.embed(targets.map(nodeEmbedText));
+    const nodeVectors = new Map(targets.map((n, i) => [n.id, vecs[i]]));
+
+    // "verify the token" hits verifyToken lexically AND semantically (auth
+    // concept); catchException can appear on at most one list. The
+    // both-signals node must rank first — that is the point of rank fusion.
+    const r = await queryGraphSemantic(graph, 'verify the auth token', { embedder, nodeVectors });
+    expect(r.matches[0]!.node.name).toBe('verifyToken');
+    const names = r.matches.map((m) => m.node.name);
+    expect(names.indexOf('verifyToken')).toBeLessThan(Math.max(names.indexOf('catchException'), 1));
+  });
+
+  it('RRF is deterministic given the same vectors', async () => {
+    const embedder = stubEmbedder();
+    const targets = graph.nodes.filter((n) => n.kind !== 'file' && n.kind !== 'external');
+    const vecs = await embedder.embed(targets.map(nodeEmbedText));
+    const nodeVectors = new Map(targets.map((n, i) => [n.id, vecs[i]]));
+    const a = await queryGraphSemantic(graph, 'where do we handle errors', { embedder, nodeVectors });
+    const b = await queryGraphSemantic(graph, 'where do we handle errors', { embedder, nodeVectors });
+    expect(a.matches.map((m) => [m.node.id, m.score])).toEqual(b.matches.map((m) => [m.node.id, m.score]));
+  });
 });
 
 describe('embedder loading', () => {
   it('returns null under --local (the only air-gapped switch — no download)', async () => {
     expect(await loadEmbedder({ local: true })).toBeNull();
   });
+
+  it('loads the backend from VIBGRATE_EMBEDDER_PATH (host-supplied, wins over own deps)', async () => {
+    // A fake `fastembed` in a host-owned dir — how the VS Code extension
+    // supplies the native backend its bundled engine deliberately omits.
+    const host = makeProject({
+      'node_modules/fastembed/package.json': JSON.stringify({
+        name: 'fastembed',
+        version: '0.0.0-test',
+        main: 'index.cjs',
+      }),
+      'node_modules/fastembed/index.cjs': [
+        'module.exports = {',
+        '  EmbeddingModel: {},',
+        '  FlagEmbedding: {',
+        '    init: async () => ({',
+        '      embed: async function* () {},',
+        '      queryEmbed: async () => [0.25, 0.75],',
+        '    }),',
+        '  },',
+        '};',
+      ].join('\n'),
+    });
+    const cacheHome = path.join(host, 'xdg-cache');
+    const savedPath = process.env.VIBGRATE_EMBEDDER_PATH;
+    const savedCache = process.env.XDG_CACHE_HOME;
+    process.env.VIBGRATE_EMBEDDER_PATH = host;
+    process.env.XDG_CACHE_HOME = cacheHome; // keep the ready-marker out of the real user cache
+    try {
+      const embedder = await loadEmbedder();
+      expect(embedder).not.toBeNull();
+      expect(embedder!.id).toBe(resolveEmbedModel());
+      expect(await embedder!.embedQuery('q')).toEqual([0.25, 0.75]);
+    } finally {
+      if (savedPath === undefined) delete process.env.VIBGRATE_EMBEDDER_PATH;
+      else process.env.VIBGRATE_EMBEDDER_PATH = savedPath;
+      if (savedCache === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = savedCache;
+      cleanup(host);
+    }
+  });
+
 });
 
 describe('embed model id + cache detection (drives the ask setup note)', () => {
@@ -108,15 +178,18 @@ describe('embed model id + cache detection (drives the ask setup note)', () => {
     expect(resolveEmbedModel('custom-model')).toBe('custom-model');
   });
 
-  it('embeddingsCached is false until this repo has a vector cache, true after', () => {
-    const dir = makeProject({});
+  it('embeddingsCached is false until this repo has a vector cache, true after', async () => {
+    const dir = makeProject(FILES);
     try {
-      const model = resolveEmbedModel();
+      const model = 'stub-emb';
       expect(embeddingsCached(dir, model)).toBe(false);
-      const cdir = path.join(dir, '.vibgrate', 'cache');
-      fs.mkdirSync(cdir, { recursive: true });
-      fs.writeFileSync(path.join(cdir, `embeddings-${model}.json`), '{}');
+      const g = (await buildGraph({ root: dir, generatedAt: '2020-01-01T00:00:00.000Z', inline: true })).graph;
+      await getNodeEmbeddings(g, countingEmbedder(), dir);
       expect(embeddingsCached(dir, model)).toBe(true);
+      // Binary file next to the map — not model-named, not under .vibgrate/cache/.
+      const embPath = path.join(dir, '.vibgrate', 'embeddings');
+      expect(fs.existsSync(embPath)).toBe(true);
+      expect(fs.existsSync(path.join(dir, '.vibgrate', 'cache', `embeddings-${model}.json`))).toBe(false);
     } finally {
       cleanup(dir);
     }
@@ -185,17 +258,34 @@ describe('getNodeEmbeddings — cached, resumable, progress', () => {
       const targets = g.nodes.filter((n) => n.kind !== 'file' && n.kind !== 'external').length;
       await getNodeEmbeddings(g, countingEmbedder(), dir); // full embed → cache written
 
-      // Simulate an interrupted run: drop two cached entries.
-      const file = path.join(dir, '.vibgrate', 'cache', `embeddings-${resolveEmbedModel('stub-emb')}.json`);
-      const cache = JSON.parse(fs.readFileSync(file, 'utf8'));
-      const drop = Object.keys(cache.entries).slice(0, 2);
-      for (const id of drop) delete cache.entries[id];
-      fs.writeFileSync(file, JSON.stringify(cache));
+      // Simulate an interrupted run: drop two cached entries via a partial
+      // legacy JSON (still accepted once), then confirm binary migration.
+      const targetsIds = g.nodes
+        .filter((n) => n.kind !== 'file' && n.kind !== 'external')
+        .map((n) => n.id);
+      const drop = targetsIds.slice(0, 2);
+      const keep = targetsIds.slice(2);
+      const bin = path.join(dir, '.vibgrate', 'embeddings');
+      fs.rmSync(bin, { force: true });
+      const cdir = path.join(dir, '.vibgrate', 'cache');
+      fs.mkdirSync(cdir, { recursive: true });
+      const legacy = path.join(cdir, 'embeddings-stub-emb.json');
+      const { hashString } = await import('../src/engine/hash.js');
+      const areaLabel = new Map(g.areas.map((a) => [a.id, a.label] as const));
+      const entries: Record<string, { hash: string; vec: number[] }> = {};
+      for (const id of keep) {
+        const n = g.nodes.find((x) => x.id === id)!;
+        entries[id] = { hash: hashString(nodeEmbedText(n, areaLabel.get(n.area))), vec: [1, 0] };
+      }
+      fs.writeFileSync(legacy, JSON.stringify({ model: 'stub-emb', entries }));
 
       const emb = countingEmbedder();
       const vecs = await getNodeEmbeddings(g, emb, dir);
       expect(emb.calls).toBe(drop.length); // only the dropped ones re-embedded
       expect(vecs.size).toBe(targets); // full set still returned
+      // Migrated to binary next to the map; legacy JSON purged.
+      expect(fs.existsSync(bin)).toBe(true);
+      expect(fs.existsSync(legacy)).toBe(false);
     } finally {
       cleanup(dir);
     }

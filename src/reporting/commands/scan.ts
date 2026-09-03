@@ -3,6 +3,8 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import {
   runCoreScan,
+  refineArchitectureWithGraph,
+  refineArchitectureWithAstRoles,
   pathExists,
   parseDsn,
   prepareCompressedUpload,
@@ -13,6 +15,7 @@ import {
   detectVcs,
   resolveRepositoryName,
   parseExcludePatterns,
+  loadConfig,
 } from '../../core-open/index.js';
 import type { ScanOptions, ScanArtifact } from '../../core-open/index.js';
 import { analyzeReachability, collectPreflightDependencies } from '../reachability.js';
@@ -54,6 +57,19 @@ export function shouldBuildCodeMap(opts: {
   noLocalArtifacts?: boolean;
 }): boolean {
   return opts.graph !== false && !opts.maxPrivacy && !opts.noLocalArtifacts;
+}
+
+function architectureGraphView(graph: VgGraph) {
+  return {
+    nodes: graph.nodes.map((n) => ({ id: n.id, file: n.file, kind: n.kind })),
+    edges: graph.edges.map((e) => ({
+      src: e.src,
+      dst: e.dst,
+      kind: e.kind,
+      confidence: e.confidence,
+      resolution: e.resolution,
+    })),
+  };
 }
 
 /**
@@ -136,8 +152,12 @@ async function autoPush(
     return;
   }
 
-  // Compact and compress artifact for upload
-  const { body, contentEncoding } = await prepareCompressedUpload(artifact);
+  // Compact and compress artifact for upload. `databaseSchemaCaps` lets
+  // `scanners.databaseSchema` in vibgrate.config.ts raise/lower the default
+  // upload caps (see DOCS.md § Database Schema).
+  const config = await loadConfig(rootDir);
+  const databaseSchemaCaps = config.scanners !== false ? config.scanners?.databaseSchema : undefined;
+  const { body, contentEncoding } = await prepareCompressedUpload(artifact, { databaseSchemaCaps });
   const timestamp = String(Date.now());
 
   let host = parsed.host;
@@ -167,6 +187,10 @@ async function autoPush(
       contentEncoding,
       timestamp,
       force: opts.force,
+      // Set only by an automated caller running the scan on the workspace's
+      // behalf (e.g. a Vibgrate-hosted remediation run) — never a customer flag.
+      runId: process.env.VIBGRATE_SCAN_RUN_ID,
+      runToken: process.env.VIBGRATE_SCAN_RUN_TOKEN,
     });
     host = uploadedHost;
 
@@ -253,6 +277,48 @@ function reportStandards(rootDir: string): void {
   }
 }
 
+/**
+ * What vgd is doing for this repo right now — printed after a scan (or a
+ * skipped one) so re-running `vg` is never a blank "unchanged" line while
+ * the semantic index is still warming.
+ */
+async function printRuntimeSnapshot(
+  rootDir: string,
+  opts: { daemon?: boolean },
+  already?: { repositoryId?: string; socketPath?: string },
+): Promise<void> {
+  try {
+    const { attachVgd } = await import('../../runtime/vgd/attach.js');
+    const { vgdRequest } = await import('../../runtime/vgd/client.js');
+    const { formatSemanticProgress } = await import('../../runtime/vgd/semantic-status.js');
+    let repositoryId = already?.repositoryId;
+    let socketPath = already?.socketPath;
+    if (!repositoryId || !socketPath) {
+      const attached = await attachVgd(rootDir, {
+        disabled: opts.daemon === false,
+        autoStart: false,
+        publish: false,
+      });
+      if (attached.status !== 'attached' || !attached.repositoryId || !attached.socketPath) return;
+      repositoryId = attached.repositoryId;
+      socketPath = attached.socketPath;
+    }
+    const semantic = await vgdRequest({ op: 'embed-status', repositoryId }, { socketPath });
+    if (!semantic.ok || !('semantic' in semantic)) return;
+    const slot =
+      semantic.semantic.slots.find((s) => s.repositoryId === repositoryId) ?? semantic.semantic.slots[0];
+    if (!slot) {
+      if (semantic.semantic.worker === 'unavailable' && semantic.semantic.reason) {
+        console.error(chalk.dim(`  · semantic · ${semantic.semantic.reason}`));
+      }
+      return;
+    }
+    console.error(chalk.dim(`  · ${formatSemanticProgress(slot)}`));
+  } catch {
+    /* no daemon, or it went away — the scan itself already succeeded */
+  }
+}
+
 function parseNonNegativeNumber(value: string | undefined, label: string): number | undefined {
   if (value === undefined) return undefined;
   const parsed = Number(value);
@@ -276,7 +342,7 @@ export const scanCommand = new Command('scan')
     collectExcludes,
     [],
   )
-  .option('--concurrency <n>', 'Max concurrent npm calls', '8')
+  .option('--concurrency <n>', 'Max concurrent registry lookups', '8')
   .option('--push', 'Auto-push results to Vibgrate API after scan')
   .option('--dsn <dsn>', 'DSN token for push (or use VIBGRATE_DSN env)')
   .option('--region <region>', 'Override data residency region for push (us, eu)')
@@ -289,11 +355,12 @@ export const scanCommand = new Command('scan')
   .option('--vulns', 'Also scan installed dependencies for known vulnerabilities (OSV online, or advisories from --package-manifest when offline)')
   .option('--package-manifest <file>', 'Use local package-version manifest JSON/ZIP (for offline mode)')
   .option('--project-scan-timeout <seconds>', 'Per-project scan timeout in seconds (default: 180)')
-  .option('--drift-budget <score>', 'Fail if drift score is above budget (0-100)')
+  .option('--drift-budget <score>', 'Fail if DriftScore is above budget (0-100)')
   .option('--drift-worsening <percent>', 'Fail if drift worsens by more than % since baseline')
   .option('--repository-name <name>', 'Override the repository name recorded for this scan (defaults to the directory or package.json name)')
   .option('--force', 'Always create a fresh scan ingest, even if the repository is unchanged since the last scan (skips the unchanged/reuse optimization). Used by scheduled and dashboard-triggered scans.')
   .option('--no-graph', 'Skip building the local code map (the AI/docs index) that scan produces after scoring drift')
+  .option('--no-daemon', 'Never auto-start or use the local runtime (vgd) — run everything in this process')
   .option('--quiet', 'Suppress promotional output (the free-plan tracking panel and the AI Context install prompt); scan results are unaffected')
   .action(async (targetPath: string, opts: {
     out?: string;
@@ -323,6 +390,8 @@ export const scanCommand = new Command('scan')
     repositoryName?: string;
     force?: boolean;
     graph?: boolean;
+    /** `--no-daemon` arrives from commander as `daemon === false`. */
+    daemon?: boolean;
     quiet?: boolean;
   }) => {
     const rootDir = path.resolve(targetPath);
@@ -332,7 +401,7 @@ export const scanCommand = new Command('scan')
     }
 
     const hasDsn = !!resolveDsn(opts.dsn);
-    const willPush = !opts.offline && (opts.push || hasDsn);
+    let willPush = !opts.offline && (opts.push || hasDsn);
 
     // `--no-local-artifacts` arrives from commander as `localArtifacts === false`
     // (the negation flag's camelCase key), so normalise it once here. Reading
@@ -355,6 +424,24 @@ export const scanCommand = new Command('scan')
     // for authenticated users rather than risk mislabelling a paid plan.
     let planTier: string | undefined;
     let upgradeUrl: string | undefined;
+    // Set when preflight says the workspace's plan cannot accept this upload
+    // (repository cap, scan credits, VM meter). A plan limit only blocks the
+    // *push* — the local scan always runs; the reason is warned up front and
+    // repeated after the results. Under --strict a blocked push is still fatal.
+    let pushBlockedReason: string | undefined;
+
+    const blockPush = (reason: string, detailLines: string[]): void => {
+      if (opts.strict) {
+        console.error(chalk.red(reason));
+        for (const line of detailLines) console.error(chalk.dim(line));
+        process.exit(1);
+      }
+      console.error(chalk.yellow(`⚠ ${reason}`));
+      for (const line of detailLines) console.error(chalk.dim(`  ${line}`));
+      console.error(chalk.dim('  Scanning locally — results will not be uploaded to Vibgrate Cloud.'));
+      pushBlockedReason = reason;
+      willPush = false;
+    };
 
     if (willPush && hasDsn) {
       const dsn = resolveDsn(opts.dsn)!;
@@ -368,6 +455,11 @@ export const scanCommand = new Command('scan')
           const preflight = await fetchScanPreflight(parsed, ingestHost, {
             repositoryName,
             vcsSha: fingerprint.vcsSha,
+            // Canonical repo identity (credential-redacted by detectVcs) — the
+            // server matches on this first, so re-scanning an already-mapped
+            // repository under a different display name (e.g. a fresh clone in
+            // a temp dir) is not miscounted as a NEW repo against the plan cap.
+            remoteUrl: vcs.remoteUrl,
           });
           pinnedRegion = preflight.region;
           planTier = preflight.plan?.tier;
@@ -376,68 +468,60 @@ export const scanCommand = new Command('scan')
           upgradeUrl =
             preflight.upgradeUrl ??
             `https://${dashHostForIngestHost(preflight.ingestHost ?? ingestHost)}/${parsed.workspaceId}`;
+          // A plan limit (VM meter, repository cap, scan credits) blocks only
+          // the upload — the local scan always runs. blockPush warns with the
+          // reason, disables the push, and exits only under --strict.
           if (preflight.vm && !preflight.vm.allowed) {
-            console.error(chalk.red(preflight.error ?? 'VM meter usage exhausted'));
-            console.error(
-              chalk.dim(
-                `VM minutes: ${preflight.vm.used}/${preflight.vm.limit} (${preflight.plan.label} plan) — enable overages or upgrade your plan.`,
-              ),
-            );
-            process.exit(1);
-          }
-          // A new repository that would breach the plan's repository cap is
-          // blocked before the (expensive) local scan runs. Re-scanning an
-          // already-mapped repository is never blocked here.
-          if (preflight.repositories && !preflight.repositories.allowed) {
-            console.error(
-              chalk.red(
-                preflight.error ??
-                  `Repository limit reached for the ${preflight.plan.label} plan — cannot scan a new repository.`,
-              ),
-            );
+            blockPush(preflight.error ?? 'VM meter usage exhausted', [
+              `VM minutes: ${preflight.vm.used}/${preflight.vm.limit} (${preflight.plan.label} plan) — enable overages or upgrade your plan.`,
+            ]);
+          } else if (preflight.repositories && !preflight.repositories.allowed) {
+            // A NEW repository that would breach the plan's repository cap.
+            // Re-scanning an already-mapped repository is never blocked here.
             const max =
               preflight.repositories.max < 0 ? 'unlimited' : String(preflight.repositories.max);
-            console.error(
-              chalk.dim(
-                `Repositories: ${preflight.repositories.total}/${max} (${preflight.plan.label} plan) — archive a repository or upgrade your plan.`,
-              ),
-            );
+            const detail = [
+              `Repositories: ${preflight.repositories.total}/${max} (${preflight.plan.label} plan) — archive a repository or upgrade your plan.`,
+            ];
             if (preflight.upgradeUrl) {
-              console.error(chalk.dim(`  Upgrade: ${preflight.upgradeUrl}`));
+              detail.push(`Upgrade: ${preflight.upgradeUrl}`);
             }
-            process.exit(1);
-          }
-          if (preflight.status === 'error' || !preflight.scans.allowed) {
-            console.error(chalk.red(preflight.error ?? 'Scan ingestion not allowed for this workspace.'));
-            console.error(
+            blockPush(
+              preflight.error ??
+                `Repository limit reached for the ${preflight.plan.label} plan — cannot upload a new repository.`,
+              detail,
+            );
+          } else if (preflight.status === 'error' || !preflight.scans.allowed) {
+            blockPush(preflight.error ?? 'Scan ingestion not allowed for this workspace.', [
+              `Credits: ${preflight.scans.used}/${preflight.scans.limit} (${preflight.plan.label} plan)`,
+            ]);
+          } else {
+            console.log(
               chalk.dim(
-                `Credits: ${preflight.scans.used}/${preflight.scans.limit} (${preflight.plan.label} plan)`,
+                `Plan: ${preflight.plan.label} — scan credits ${preflight.scans.used}/${preflight.scans.limit} this month`,
               ),
             );
-            if (opts.strict) process.exit(1);
-            process.exit(1);
-          }
-          console.log(
-            chalk.dim(
-              `Plan: ${preflight.plan.label} — scan credits ${preflight.scans.used}/${preflight.scans.limit} this month`,
-            ),
-          );
-          // `--force` opts out of the unchanged short-circuit so scheduled and
-          // dashboard-triggered scans always produce a fresh report.
-          if (preflight.repository?.unchanged && !opts.force) {
-            console.log(
-              chalk.green('✔')
-                + ` Repository unchanged at ${preflight.repository.lastVcsSha?.slice(0, 7) ?? 'same revision'} — skipping scan.`,
-            );
-            if (preflight.repository.lastIngestId) {
-              emitIngestIdLine(preflight.repository.lastIngestId, { unchanged: true });
-              const dashUrl = `https://${dashHostForIngestHost(ingestHost)}/${parsed.workspaceId}/scan/${preflight.repository.lastIngestId}`;
-              console.log(chalk.dim(`  Latest report: ${dashUrl}`));
-            } else if (opts.strict) {
-              console.error(chalk.red('Repository unchanged but no previous ingest id available.'));
-              process.exit(1);
+            // `--force` opts out of the unchanged short-circuit so scheduled and
+            // dashboard-triggered scans always produce a fresh report.
+            if (preflight.repository?.unchanged && !opts.force) {
+              console.log(
+                chalk.green('✔')
+                  + ` Repository unchanged at ${preflight.repository.lastVcsSha?.slice(0, 7) ?? 'same revision'} — skipping scan.`,
+              );
+              if (preflight.repository.lastIngestId) {
+                emitIngestIdLine(preflight.repository.lastIngestId, { unchanged: true });
+                const dashUrl = `https://${dashHostForIngestHost(ingestHost)}/${parsed.workspaceId}/scan/${preflight.repository.lastIngestId}`;
+                console.log(chalk.dim(`  Latest report: ${dashUrl}`));
+              } else if (opts.strict) {
+                console.error(chalk.red('Repository unchanged but no previous ingest id available.'));
+                process.exit(1);
+              }
+              // A skipped scan still has a daemon and a semantic index — say
+              // what they are doing. Re-running `vg` after clearing the
+              // terminal used to print only "unchanged" and look idle.
+              await printRuntimeSnapshot(rootDir, opts);
+              return;
             }
-            return;
           }
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
@@ -504,7 +588,7 @@ export const scanCommand = new Command('scan')
     // against the freshly built map without a second (memory-heavy) build.
     let builtGraph: VgGraph | null = null;
     if (wantGraph) {
-      scanOpts.postScan = async (report) => {
+      scanOpts.postScan = async (report, ctx) => {
         const result = await buildGraph({
           root: rootDir,
           exclude: opts.exclude,
@@ -517,6 +601,18 @@ export const scanCommand = new Command('scan')
         writeSnapshot(rootDir, result.graph.provenance.corpusHash, result.fileStats, {
           exclude: opts.exclude,
         });
+        // Refine before format/write — architecture is already on these objects.
+        // --no-graph / map failed / --max-privacy never reach here.
+        // AST roles first so @Entity / @Controller confirm (or override a
+        // filename suffix) before boundary violations are collected.
+        refineArchitectureWithAstRoles(
+          { projects: ctx.projects, solutions: ctx.solutions, extended: ctx.extended },
+          result.fileRoles,
+        );
+        refineArchitectureWithGraph(
+          { projects: ctx.projects, solutions: ctx.solutions, extended: ctx.extended },
+          architectureGraphView(result.graph),
+        );
         const { counts } = result.graph.meta;
         return `${counts.nodes.toLocaleString()} nodes · ${counts.edges.toLocaleString()} edges`;
       };
@@ -526,6 +622,41 @@ export const scanCommand = new Command('scan')
     // open build, so the scan runs entirely on the open base engine.
     const advanced = await loadAdvancedScanHook();
     const artifact = await runCoreScan(rootDir, scanOpts, advanced);
+
+    // The scan just built a code map (its `postScan` step). Start the local
+    // runtime if it is not up and hand it that map, so the very first `vg` in a
+    // repo leaves behind a warm graph slot and a warming semantic index rather
+    // than a daemon that has never heard of this repository. Best-effort and
+    // silent: `attachVgd` never throws, and no daemon is a supported setup.
+    if (wantGraph && builtGraph) {
+      const { attachVgd } = await import('../../runtime/vgd/attach.js');
+      const { ActivityLog } = await import('../../runtime/vgd/activity.js');
+      const activity = new ActivityLog();
+      const attached = await activity.time(
+        'attach',
+        () => attachVgd(rootDir, { disabled: opts.daemon === false }),
+        (a) => {
+          if (a.status !== 'attached') return { outcome: 'skip' as const, detail: `${a.reason} — the map stays on disk only` };
+          const started = a.started ? 'started vgd' : 'attached to vgd';
+          if (a.published?.status === 'published') {
+            return {
+              outcome: 'ok' as const,
+              detail: `${started} · map published ${a.published.gitRef} · ${a.published.nodeCount} nodes`,
+            };
+          }
+          return { outcome: 'ok' as const, detail: started };
+        },
+      );
+      if (!opts.quiet && opts.format !== 'json') {
+        for (const line of activity.render()) console.error(line);
+        if (attached.status === 'attached') {
+          await printRuntimeSnapshot(rootDir, opts, {
+            repositoryId: attached.repositoryId,
+            socketPath: attached.socketPath,
+          });
+        }
+      }
+    }
 
     // Machine-readable drift score for the remediation agent's before/after gate
     // (no-op unless VIBGRATE_EMIT_MARKERS=1). Emitted from the freshly computed
@@ -555,7 +686,7 @@ export const scanCommand = new Command('scan')
     }
 
     if (scanOpts.driftBudget !== undefined && artifact.drift.score > scanOpts.driftBudget) {
-      console.error(chalk.red(`\nFailing fitness function: drift score ${artifact.drift.score}/100 exceeds budget ${scanOpts.driftBudget}.`));
+      console.error(chalk.red(`\nFailing fitness function: DriftScore ${artifact.drift.score}/100 exceeds budget ${scanOpts.driftBudget}.`));
       process.exit(2);
     }
 
@@ -589,6 +720,14 @@ export const scanCommand = new Command('scan')
 
     if (willPush) {
       await autoPush(artifact, rootDir, scanOpts);
+    } else if (pushBlockedReason) {
+      // Repeat the preflight warning after the (long) scan output so the
+      // reason the results never reached Vibgrate Cloud is the last thing seen.
+      console.error('');
+      console.error(chalk.yellow(`⚠ Results were not uploaded: ${pushBlockedReason}`));
+      if (upgradeUrl) {
+        console.error(chalk.dim(`  Upgrade: ${upgradeUrl}`));
+      }
     }
 
     // On first run with no cloud connection and text output, prompt the user

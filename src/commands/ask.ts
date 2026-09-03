@@ -1,5 +1,9 @@
 import { Command } from 'commander';
 import { queryGraph, queryGraphSemantic, type QueryResult } from '../engine/query.js';
+import { rankQuestion } from '../engine/relevance-provider.js';
+import { rankingAskFrom } from '../engine/user-ask.js';
+import { ensureRelevanceModule } from '../install/relevance-module.js';
+import { loadTopicTags } from '../engine/relevance-enrich.js';
 import {
   loadEmbedder,
   getNodeEmbeddings,
@@ -9,12 +13,16 @@ import {
   type EmbedUnavailable,
 } from '../engine/embeddings.js';
 import { refreshIfStale } from '../engine/refresh.js';
+import { attachVgd, type AttachResult } from '../runtime/vgd/attach.js';
+import { ActivityLog, type ActivityOutcome } from '../runtime/vgd/activity.js';
+import { DaemonSemanticSession } from '../runtime/vgd/semantic-client.js';
 import { driftCount } from '../engine/freshness.js';
+import { resolveGraphPath } from '../engine/artifacts.js';
 import { recordCliCall, CLI_TOOL_ALIASES } from '../engine/savings.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { requireGraph, rootOf } from './util.js';
 import { c, info, json, out } from '../util/output.js';
-import { ProgressBar } from '../util/progress.js';
+import { LiveStatus, ProgressBar } from '../util/progress.js';
 
 /**
  * `vg ask "<question>"` (VG-CLI-SPEC §3.2). Hybrid lexical+structural+semantic
@@ -45,7 +53,10 @@ export function registerAsk(program: Command): void {
       // custom --graph is an explicit artifact and is never rebuilt over.
       // Fail-soft — a refresh problem falls back to the last built map.
       if (opts.refresh !== false && !global.graph) {
-        const refreshed = await refreshIfStale(root);
+        // Thread the resolved map path so a refresh never re-runs defaultGraphPath
+        // (which shells out to git for the branch-keyed global store).
+        const graphPath = resolveGraphPath(root, global.graph);
+        const refreshed = await refreshIfStale(root, { graphPath });
         if (refreshed.status === 'refreshed' && !global.json) {
           const n = driftCount(refreshed.drift);
           info(c.dim(`  map refreshed — ${n} file(s) drifted (${(refreshed.ms / 1000).toFixed(2)}s)`));
@@ -54,37 +65,111 @@ export function registerAsk(program: Command): void {
         }
       }
       const { graph } = requireGraph(global);
+      // Join the local runtime (starting it if needed) and hand it this map, so
+      // the semantic pass below can run against its resident index instead of
+      // loading a model into this short-lived process.
+      const activity = new ActivityLog();
+      const live = !global.json ? new LiveStatus() : null;
+      live?.start('attaching to vgd…');
+      const attached = await activity.time(
+        'attach',
+        () =>
+          attachVgd(root, {
+            graphPath: global.graph,
+            disabled: global.daemon === false,
+            // Skip the republish when the daemon already holds this exact map:
+            // a publish drops the slot's vectors, so doing it on every ask
+            // churned the index for nothing.
+            corpusHash: graph.provenance?.corpusHash,
+          }),
+        (a) => describeAttach(a),
+      );
       const budget = Number(opts.budget) || 2000;
       const q = question.join(' ');
       // Semantic is the default; --no-semantic or --local opt out.
-      const wantSemantic = opts.semantic !== false && !global.local;
+      const wantSemantic = opts.semantic !== false && !global.offline;
 
       let result: QueryResult;
       let mode = 'lexical';
       let note = '';
+      // The relevance module ranks the seeds. If the startup readiness kick
+      // has not landed it yet, retry once here (bounded by the fetch itself,
+      // silent on failure) — then rank, falling back mechanically when the
+      // module still is not available. `--local` stays network-free.
+      if (!global.offline) await ensureRelevanceModule();
+      const topicTags = await loadTopicTags(graph, root, resolveGraphPath(root, global.graph));
+      const modRank = await rankQuestion(graph, rankingAskFrom(q), { limit: 48, topicTags });
 
+      try {
       if (wantSemantic) {
-        // A genuine first run for this repo (no cached vectors yet) → show a
-        // one-time note + live progress bar for the embedding pass. Otherwise stay quiet.
-        const firstRun = !embeddingsCached(root, resolveEmbedModel());
-        if (!global.json && firstRun) {
-          info(c.dim('  preparing semantic search (first use embeds the map; cached, resumable & offline after)…'));
-        }
-        let reason: EmbedUnavailable | undefined;
-        const embedder = await loadEmbedder({ local: global.local, onUnavailable: (r) => (reason = r) });
-        if (embedder) {
-          const bar = !global.json && firstRun ? new ProgressBar(c.dim('embedding')) : undefined;
-          const vectors = await getNodeEmbeddings(graph, embedder, root, bar ? (d, t) => bar.update(d, t) : undefined);
-          bar?.done();
-          result = await queryGraphSemantic(graph, q, { budget, embedder, nodeVectors: vectors });
-          mode = `semantic (${embedder.id})`;
+        // Daemon first: it already holds vectors for this slot, so it answers
+        // the semantic half without this process loading the model at all.
+        live?.set('asking the daemon…');
+        const ranked = attached.status === 'attached' && attached.repositoryId
+          ? await activity.time(
+              'semantic',
+              // The attach above already resolved (and, if needed, published)
+              // the slot — this session only sends the question.
+              () =>
+                new DaemonSemanticSession(root, { socketPath: attached.socketPath, publish: false }).rank(q, undefined, {
+                  onProgress: (p) => live?.set(p.detail),
+                }),
+              (r) =>
+                r
+                  ? { outcome: 'ok' as const, detail: `ranked in the daemon · ${r.ranked.length} of ${r.vectors} vector(s)${r.model ? ` · ${r.model}` : ''}` }
+                  : { outcome: 'skip' as const, detail: 'daemon index unavailable — embedding in this process' },
+            )
+          : null;
+        if (ranked) {
+          live?.set('answering from the daemon index…');
+          result = await queryGraphSemantic(graph, q, {
+            budget,
+            semanticRanked: ranked.ranked,
+            ranked: modRank,
+          });
+          mode = `semantic (vgd${ranked.model ? `, ${ranked.model}` : ''})`;
+          activity.add('answer', 'ok', 'answered from the daemon index — no local model load');
         } else {
-          result = queryGraph(graph, q, { budget });
-          note = reason ? unavailableMessage(reason) : 'semantic unavailable; used lexical';
+          // Always show progress for the in-process pass: loading the model
+          // and embedding tens of thousands of nodes is the slow path, and
+          // staying quiet there is what made ask look hung.
+          const firstRun = !embeddingsCached(root, resolveEmbedModel());
+          live?.set(
+            firstRun
+              ? 'loading the embedding model (first use; then cached and offline)…'
+              : 'embedding the map in this process…',
+          );
+          let reason: EmbedUnavailable | undefined;
+          let detail: string | undefined;
+          const embedder = await loadEmbedder({
+            local: global.offline,
+            onUnavailable: (r, d) => {
+              reason = r;
+              detail = d;
+            },
+          });
+          if (embedder) {
+            live?.stop();
+            const bar = !global.json ? new ProgressBar(c.dim('embedding')) : undefined;
+            const vectors = await getNodeEmbeddings(graph, embedder, root, bar ? (d, t) => bar.update(d, t) : undefined);
+            bar?.done();
+            result = await queryGraphSemantic(graph, q, { budget, embedder, nodeVectors: vectors, ranked: modRank });
+            mode = `semantic (${embedder.id})`;
+            activity.add('answer', 'ok', `answered in this process · ${embedder.id} · ${vectors.size} vector(s)`);
+          } else {
+            result = queryGraph(graph, q, { budget, ranked: modRank });
+            note = reason ? unavailableMessage(reason) : 'semantic unavailable; used lexical';
+            if (detail) note += ` (${detail})`;
+            activity.add('answer', 'warn', `lexical only — ${note}`);
+          }
         }
       } else {
-        result = queryGraph(graph, q, { budget });
-        if (global.local) note = 'semantic skipped under --local; used lexical';
+        result = queryGraph(graph, q, { budget, ranked: modRank });
+        if (global.offline) note = 'semantic skipped under --offline; used lexical';
+        activity.add('answer', 'skip', global.offline ? 'lexical only (--offline)' : 'lexical only (--no-semantic)');
+      }
+      } finally {
+        live?.stop();
       }
 
       // Count this call in the local ledger when an AI host identified itself
@@ -111,6 +196,7 @@ export function registerAsk(program: Command): void {
           question: result.question,
           mode,
           note: note || undefined,
+          activity: activity.toJSON(),
           tokensEstimate: result.tokensEstimate,
           matches: result.matches.map((m) => ({
             name: m.node.qualifiedName,
@@ -129,6 +215,24 @@ export function registerAsk(program: Command): void {
       info('');
       info(c.dim(`vg · ${result.matches.length} match(es) · ~${result.tokensEstimate} tokens (budget ${budget}) · ${mode}`));
       if (note) info(c.yellow(`  ${note}`));
+      for (const line of activity.render()) info(line);
     });
   applyGlobalOptions(cmd);
+}
+
+/** One line describing what attaching to the runtime achieved. */
+function describeAttach(a: AttachResult): { outcome: ActivityOutcome; detail: string } {
+  if (a.status === 'disabled') return { outcome: 'skip', detail: `${a.reason} — running in this process` };
+  if (a.status === 'unavailable') return { outcome: 'skip', detail: `${a.reason} — running in this process` };
+  const started = a.started ? 'started vgd' : 'attached to vgd';
+  if (a.published?.status === 'current') {
+    return { outcome: 'ok', detail: `${started} · already holds this map (${a.published.gitRef})` };
+  }
+  if (a.published?.status === 'published') {
+    return { outcome: 'ok', detail: `${started} · map published ${a.published.gitRef} · ${a.published.nodeCount} nodes` };
+  }
+  if (a.published?.status === 'failed') {
+    return { outcome: 'warn', detail: `${started} · map not published (${a.published.error})` };
+  }
+  return { outcome: 'ok', detail: started };
 }

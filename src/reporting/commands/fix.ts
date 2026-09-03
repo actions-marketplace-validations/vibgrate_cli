@@ -26,6 +26,7 @@ import * as readline from 'node:readline';
 import { analyzeTree, type SourceEcosystem } from '../planning/usage.js';
 import { requestFixPlan, parseFixPlanResponse } from '../utils/fix-plan.js';
 import { renderText, renderMarkdown } from '../planning/render.js';
+import { dedupePlans } from '../planning/dedupe.js';
 import { estimateDriftScore } from '../planning/expected-drift.js';
 import { applyPlan, type NpmPackageManager, type WorkspaceTarget } from '../planning/apply.js';
 import { detectWorkspaceRoot } from './update.js';
@@ -141,7 +142,7 @@ async function repositoryIdentity(rootDir: string, override?: string): Promise<{
 }
 
 export const fixCommand = new Command('fix')
-  .description('Analyse drift and get ranked, risk-tiered upgrade plans from the hosted planner (requires login/DSN; read-only — never edits your project)')
+  .description('Get ranked, risk-tiered upgrade plans from the hosted planner and optionally apply them (prompts before changing files; --yes applies non-interactively, --dry-run previews, --no-apply only prints). Requires login/DSN.')
   .argument('[path]', 'Path to analyse', '.')
   .option('--in <file>', 'Scan artifact to read', '.vibgrate/scan_result.json')
   .option('--format <format>', 'Output format (text|json|md)', 'text')
@@ -150,7 +151,7 @@ export const fixCommand = new Command('fix')
   .option('--repository-name <name>', 'Override the repository name recorded for this plan')
   .option('--plan <tier>', 'Apply a specific plan non-interactively (safe|balanced|aggressive)')
   .option('--yes', 'Apply the recommended plan without prompting')
-  .option('--dry-run', 'Show what would change without applying')
+  .option('--dry-run', 'Preview the recommended plan (or --plan <tier>) without applying; never prompts')
   .option('--no-apply', 'Only print the plans; never modify the project')
   .option('--fail-on-vulns <severity>', 'Exit non-zero if the recommended plan leaves an advisory at/above this severity unresolved (low|moderate|high|critical)')
   .action(async (targetPath: string, opts: {
@@ -272,6 +273,14 @@ export const fixCommand = new Command('fix')
       process.exit(1);
     }
 
+    // Collapse duplicate plans onto the lowest-risk tier before anything is
+    // rendered or selected: a tier whose upgrade set is identical to a
+    // lower-risk tier's adds no real choice. Requests for a collapsed tier
+    // (--plan, the server's recommendation) resolve via the alias map.
+    const { plans: dedupedPlans, canonicalTier } = dedupePlans(response.plans);
+    response.plans = dedupedPlans;
+    response.recommended = canonicalTier.get(response.recommended) ?? response.recommended;
+
     // Augment each plan with an estimated post-upgrade DriftScore (client-side).
     const currentDrift = artifact.drift?.score;
     if (typeof currentDrift === 'number') {
@@ -288,7 +297,7 @@ export const fixCommand = new Command('fix')
 
     // Apply flow (text mode only; --no-apply / json / md are report-only).
     if (opts.format === 'text' && opts.apply !== false) {
-      await runApplyFlow(rootDir, artifact, response, opts);
+      await runApplyFlow(rootDir, artifact, response, opts, canonicalTier);
     }
 
     if (failOn) {
@@ -301,9 +310,10 @@ export const fixCommand = new Command('fix')
         if (SEVERITY_RANK[sev] < threshold) continue;
         const open = response.unresolved.bySeverity[sev] ?? 0;
         // Anything the recommended plan itself does not fix also counts as open.
-        const notFixedByRecommended =
-          (response.plans.find((p) => p.tier === 'aggressive')?.fixes.bySeverity[sev] ?? 0) -
-          (recommended?.fixes.bySeverity[sev] ?? 0);
+        // Measured against the most-fixing plan (not the 'aggressive' tier by
+        // name — that tier may have been collapsed as a duplicate).
+        const maxFixable = Math.max(0, ...response.plans.map((p) => p.fixes.bySeverity[sev] ?? 0));
+        const notFixedByRecommended = maxFixable - (recommended?.fixes.bySeverity[sev] ?? 0);
         stillOpen += open + Math.max(0, notFixedByRecommended);
       }
       if (stillOpen > 0) {
@@ -438,6 +448,7 @@ async function runApplyFlow(
   artifact: ScanArtifact,
   response: FixPlanResponse,
   opts: { plan?: string; yes?: boolean; dryRun?: boolean },
+  canonicalTier?: Map<PlanTier, PlanTier>,
 ): Promise<void> {
   const nonEmpty = response.plans.filter((p) => p.upgrades.length > 0);
   if (nonEmpty.length === 0) {
@@ -447,15 +458,28 @@ async function runApplyFlow(
 
   let chosen: UpgradePlan | undefined;
   if (opts.plan) {
-    chosen = response.plans.find((p) => p.tier === opts.plan);
+    // A tier collapsed as a duplicate resolves to the surviving lower-risk plan.
+    const tier = canonicalTier?.get(opts.plan as PlanTier) ?? opts.plan;
+    chosen = response.plans.find((p) => p.tier === tier);
     if (!chosen) {
       console.error(chalk.red(`Unknown plan '${opts.plan}'. Use safe, balanced, or aggressive.`));
       process.exit(1);
     }
   } else if (nonEmpty.length === 1) {
     chosen = nonEmpty[0];
-  } else if (opts.yes) {
+  } else if (opts.yes || opts.dryRun) {
+    // --yes applies the recommended plan without a pick. --dry-run previews that
+    // same plan without prompting: asking which tier to "apply" is meaningless
+    // when nothing is written. Pass --plan <tier> to dry-run a specific plan.
     chosen = response.plans.find((p) => p.tier === response.recommended) ?? nonEmpty[0];
+    if (opts.dryRun && !opts.yes && nonEmpty.length > 1) {
+      console.log(
+        chalk.dim(
+          `\nDry-run previews the recommended (${chosen.tier}) plan — nothing will be written. ` +
+            'Pass --plan <safe|balanced|aggressive> to preview another tier.',
+        ),
+      );
+    }
   } else if (process.stdin.isTTY && process.stdout.isTTY) {
     const tier = await promptPlanSelection(response);
     if (!tier) {
@@ -464,7 +488,7 @@ async function runApplyFlow(
     }
     chosen = response.plans.find((p) => p.tier === tier);
   } else {
-    console.log(chalk.dim('\nMultiple plans available — re-run with --plan <tier> or --yes to apply, or --dry-run to preview.'));
+    console.log(chalk.dim('\nMultiple plans available — re-run with --plan <tier> or --yes to apply, or --dry-run to preview the recommended plan.'));
     return;
   }
   if (!chosen || chosen.upgrades.length === 0) {

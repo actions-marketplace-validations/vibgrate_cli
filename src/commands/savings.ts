@@ -1,5 +1,5 @@
 import { Command } from 'commander';
-import { readSavings, readUsage, type UsageReport } from '../engine/savings.js';
+import { clearSavings, readSavings, readUsage, readModelSavings, type UsageReport, type ModelSaving } from '../engine/savings.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { rootOf } from './util.js';
 import { c, info, json } from '../util/output.js';
@@ -14,16 +14,33 @@ export function registerSavings(program: Command): void {
     .command('savings')
     .description('local, privacy-safe report of tokens/$ saved vs a grep baseline (estimates)')
     .option('--days <n>', 'window in days', '30')
+    .option('--clear', 'delete the recorded usage data for this repo')
     .action(function (this: Command) {
       const global = readGlobal(this);
       const days = Number(this.opts().days) || 30;
       const root = rootOf(global);
+
+      if (this.opts().clear) {
+        const existed = clearSavings(root);
+        if (global.json) {
+          json({ ok: true, cleared: existed });
+          return;
+        }
+        info(
+          existed
+            ? `${c.cyan('vg savings')} ${c.dim('--clear')} · usage data deleted for this repo`
+            : `${c.cyan('vg savings')} ${c.dim('--clear')} · nothing recorded here — nothing to delete`,
+        );
+        return;
+      }
+
       const now = Date.now();
       const report = readSavings(root, days, now);
       const usage = readUsage(root, days, now);
+      const models = readModelSavings(root, days, now);
 
       if (global.json) {
-        json({ ...report, usage });
+        json({ ...report, usage, models });
         return;
       }
 
@@ -50,6 +67,8 @@ export function registerSavings(program: Command): void {
       printBreakdown(usage);
       // The command-vs-MCP split and which AI is calling.
       printSplit(usage);
+      // Per-model savings (VG Code attributes each call to its model).
+      printModels(models);
     });
   applyGlobalOptions(cmd);
 }
@@ -68,7 +87,7 @@ function printBreakdown(usage: UsageReport): void {
   const header =
     '    ' +
     'command'.padEnd(nameW) +
-    ['calls', 'complete', 'partial', 'miss', 'success%'].map((h) => h.padStart(9)).join('');
+    ['calls', 'complete', 'partial', 'miss', 'success%', 'avg ms'].map((h) => h.padStart(9)).join('');
   info(c.dim(header));
   for (const cmd of usage.commands) {
     info(
@@ -78,11 +97,13 @@ function printBreakdown(usage: UsageReport): void {
         String(cmd.complete).padStart(9) +
         String(cmd.partial).padStart(9) +
         String(cmd.miss).padStart(9) +
-        `${cmd.successPct}%`.padStart(9),
+        `${cmd.successPct}%`.padStart(9) +
+        // Absent ≠ zero: calls recorded before timing existed show '—'.
+        (cmd.avgMs === null ? '—' : String(cmd.avgMs)).padStart(9),
     );
   }
   const t = usage.totals;
-  info(c.dim('    ' + '─'.repeat(nameW + 45)));
+  info(c.dim('    ' + '─'.repeat(nameW + 54)));
   info(
     '    ' +
       c.bold('total'.padEnd(nameW)) +
@@ -90,9 +111,29 @@ function printBreakdown(usage: UsageReport): void {
       String(t.complete).padStart(9) +
       String(t.partial).padStart(9) +
       String(t.miss).padStart(9) +
+      ''.padStart(9) +
       ''.padStart(9),
   );
   info(c.dim(`    avg success across commands: ${usage.avgSuccessPct}%`));
+}
+
+/** Render per-model savings — how many calls each model made and the tokens/$ saved. */
+function printModels(models: ModelSaving[]): void {
+  if (models.length === 0) return;
+  info('');
+  info(c.bold('  by model') + c.dim('  (VG Code attributes each call to its provider/model)'));
+  const nameW = Math.max(12, ...models.map((m) => m.key.length));
+  info(c.dim('    ' + 'model'.padEnd(nameW) + ['queries', 'tokens', 'baseline', 'saved $'].map((h) => h.padStart(11)).join('')));
+  for (const m of models) {
+    info(
+      '    ' +
+        m.key.padEnd(nameW) +
+        String(m.queries).padStart(11) +
+        fmt(m.vgTokens).padStart(11) +
+        fmt(m.baselineTokens).padStart(11) +
+        `$${m.saved}`.padStart(11),
+    );
+  }
 }
 
 /**

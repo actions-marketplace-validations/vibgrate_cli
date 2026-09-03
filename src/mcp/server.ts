@@ -5,10 +5,16 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { parseGraph } from '../engine/serialize.js';
-import { refreshIfStale } from '../engine/refresh.js';
-import { TOOLS, warmEmbedderInBackground } from './tools.js';
+import { mapFileStat } from '../engine/snapshot.js';
+import { loadGraphPreferIndex } from '../engine/index-db.js';
+import type { RefreshOutcome, refreshIfStale } from '../engine/refresh.js';
+import { RefreshScheduler, REFRESH_BUDGET_MS as SCHEDULER_BUDGET_MS } from '../engine/refresh-scheduler.js';
+import { TOOLS, budgetSuffix, listedToolNames, warmEmbedderInBackground, type ToolSurface } from './tools.js';
+import { isRelevantChange } from '../engine/watch-filter.js';
+import { DaemonSemanticSession } from '../runtime/vgd/semantic-client.js';
 import { renderToolResult } from './response.js';
 import { recordSaving, sanitizeClient, PER_FILE_TOKENS, SAVINGS_TOOLS, type Outcome } from '../engine/savings.js';
+import type { SessionStats } from './serve-stats.js';
 import { countTokens } from '../engine/tokens.js';
 import { VERSION } from '../version.js';
 import type { VgGraph } from '../schema.js';
@@ -24,24 +30,44 @@ import type { VgGraph } from '../schema.js';
  * 2. **Auto-refresh** (default on) — each tool call runs a debounced, stat-only
  *    freshness probe against the last build's snapshot; if the working tree
  *    drifted, an incremental rebuild runs in-process (cross-process locked,
- *    single-flight). The call waits for it up to a small budget — warm
- *    incremental rebuilds land well inside it — and otherwise answers from
- *    the current map while the rebuild finishes for the next call.
+ *    single-flight). The call waits only a **micro-budget** so a warm probe can
+ *    land without stalling MCP tools — otherwise it answers from the current
+ *    map while the rebuild finishes for a later call (hot-reload picks it up).
  *
  * Every tool remains read-only and auto-approvable; the refresh only rewrites
  * vg's own artifacts under `.vibgrate/`, never user code.
  */
 
-/** Min gap between freshness probes — bounds stat-walk cost under bursty tool calls. */
-const PROBE_INTERVAL_MS = 2000;
-/** Ceiling for the self-tuned probe interval on very large repos. */
-const MAX_PROBE_INTERVAL_MS = 30_000;
-/** Probe may consume at most ~1/PROBE_DUTY_FACTOR of serve wall-time (20 → ≤5%). */
-const PROBE_DUTY_FACTOR = 20;
-/** How long a tool call waits for an in-flight refresh before answering from the current map. */
-const REFRESH_BUDGET_MS = 5_000;
-/** After a refresh failure (e.g. read-only checkout), don't retry for this long. */
-const FAILURE_COOLDOWN_MS = 60_000;
+/**
+ * How long a tool call waits for an in-flight refresh before answering from
+ * the current map. Kept deliberately small: MCP tool latency is sub-10ms on
+ * warm maps, and a multi-second budget (the previous 5s ceiling matched
+ * `git rev-parse`'s spawn timeout) turned every sequential tool call during a
+ * large-repo rebuild into a multi-second stall — measured as TypeScript p50
+ * ~5.2s on the release benchmark for the `vg-cli-public` corpus entry.
+ * Warm probes still finish inside this window; heavy rebuilds never should.
+ *
+ * Re-exported from the shared scheduler, which owns this and the probe-interval
+ * tuning for every surface (`vg serve` and `vg lsp` alike).
+ */
+export const REFRESH_BUDGET_MS = SCHEDULER_BUDGET_MS;
+/** Settle time between a watcher event and the background refresh it triggers. */
+const WATCH_DEBOUNCE_MS = 400;
+
+export type RefreshImpl = typeof refreshIfStale;
+
+export interface GraphSourceTuning {
+  probeIntervalMs?: number;
+  refreshBudgetMs?: number;
+  /**
+   * Workspace root for freshness probes. Prefer passing this explicitly —
+   * deriving it from `graphPath` via `dirname` twice only works for the legacy
+   * `root/.vibgrate/graph.json` layout, not the global branch-keyed store.
+   */
+  root?: string;
+  /** Tests only: inject a slow/fake refresh to assert the micro-budget. */
+  refreshImpl?: RefreshImpl;
+}
 
 export interface ServeOptions {
   /** Record local, counts-only usage savings (opt-in). */
@@ -59,83 +85,262 @@ export interface ServeOptions {
   dedup?: boolean;
   /** Auto-refresh the map when the working tree drifts (default true). */
   refresh?: boolean;
+  /** `--no-daemon`: never auto-start or use the local runtime. */
+  daemon?: boolean;
+  /**
+   * Event-driven refresh: recursive fs.watch on the workspace so a save
+   * rebuilds in ~400 ms instead of waiting out the freshness poll (default
+   * true when refresh is on; `--no-watch` opts out). Where recursive watch is
+   * unavailable the poll silently remains the only mechanism.
+   */
+  watch?: boolean;
+  /**
+   * Workspace root (project directory). When set, freshness probes and tools
+   * use this instead of inferring root from the graph path.
+   */
+  root?: string;
+  /**
+   * In-memory session stats behind the live `vg serve` status display. Always
+   * safe to pass: nothing recorded here is persisted or uploaded — it dies with
+   * the process (the opt-in ledger above is a separate concern).
+   */
+  stats?: SessionStats;
+  /**
+   * Listing surface (`--surface hot` / `--tools a,b`). Filters ONLY what
+   * `tools/list` advertises; every tool stays callable so behaviour is
+   * byte-identical across surfaces. See `listedToolNames` in ./tools.ts.
+   */
+  toolSurface?: ToolSurface;
 }
 
 export class GraphSource {
   private cachedMtimeMs = -1;
+  /**
+   * True while the daemon owns freshness for this workspace. Set only after
+   * the daemon confirms a subscription, cleared the instant it drops — so the
+   * failure mode is "this process watches again", never "nobody watches".
+   */
+  private daemonOwnsFreshness = false;
   private cached: VgGraph | null = null;
-  private readonly root: string;
-  private lastProbeAt = 0;
-  private failedUntil = 0;
-  private inflight: Promise<void> | null = null;
-  /** Self-tuned: grows with measured probe cost so huge repos aren't penalized. */
-  private probeIntervalMs = PROBE_INTERVAL_MS;
+  /** Project root used for freshness probes and rebuilds. */
+  readonly root: string;
+  /** Debounce, single-flight, self-tuning and budget cap — shared with `vg lsp`. */
+  private readonly refresher: RefreshScheduler;
+  /**
+   * Files seen changing since the last COMMITTED refresh (watcher events,
+   * filename → last-seen ms). Entries are cleared only after a refresh that
+   * started at-or-after their last event completes with 'fresh'/'refreshed' —
+   * a change landing mid-refresh stays pending, so the staleness signal can
+   * be a false positive but never a false negative.
+   */
+  private readonly pendingChanges = new Map<string, number>();
+  private watcher: fs.FSWatcher | null = null;
+  private watchTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     readonly graphPath: string,
     private readonly refresh = false,
-    /** Timing overrides (tests only). */
-    private readonly tuning: { probeIntervalMs?: number; refreshBudgetMs?: number } = {},
+    /** Timing / root overrides (production passes `root`; tests may pass more). */
+    private readonly tuning: GraphSourceTuning = {},
   ) {
-    // root = the directory containing .vibgrate/ (graphPath = root/.vibgrate/graph.json)
-    this.root = path.dirname(path.dirname(graphPath));
+    // Prefer an explicit root. Fallback assumes legacy `root/.vibgrate/graph.json`
+    // (dirname twice); wrong for the global store — callers should pass `root`.
+    this.root = tuning.root ?? path.dirname(path.dirname(graphPath));
+    this.refresher = new RefreshScheduler({
+      root: this.root,
+      graphPath,
+      probeIntervalMs: tuning.probeIntervalMs,
+      refreshBudgetMs: tuning.refreshBudgetMs,
+      refreshImpl: tuning.refreshImpl,
+      onSettled: (outcome, startedAt) => this.onRefreshSettled(outcome, startedAt),
+    });
+  }
+
+  /**
+   * Hand freshness to the daemon: stop probing on every call and stop watching.
+   * The daemon pushes `slot-changed` and we reload from disk then.
+   */
+  deferFreshnessToDaemon(): void {
+    this.daemonOwnsFreshness = true;
+    this.stopWatching();
+  }
+
+  /** The daemon went away — resume owning freshness locally. */
+  resumeLocalFreshness(): void {
+    this.daemonOwnsFreshness = false;
+    this.startWatching();
+  }
+
+  /** The daemon says the map moved; drop the cache so the next get() re-reads. */
+  reloadFromDisk(): void {
+    this.cachedMtimeMs = -1;
+    this.pendingChanges.clear();
   }
 
   /** Current graph: auto-refreshed if the tree drifted, reloaded if the file changed. */
   async get(): Promise<VgGraph> {
-    if (this.refresh) await this.maybeRefresh();
-    const stat = fs.statSync(this.graphPath); // throws if missing → surfaced as tool error
+    if (this.refresh && !this.daemonOwnsFreshness) await this.maybeRefresh();
+    // JSON when present, else the standalone snapshot (global-store mode);
+    // throws if neither exists → surfaced as tool error.
+    const stat = mapFileStat(this.graphPath);
     if (stat.mtimeMs !== this.cachedMtimeMs || !this.cached) {
-      this.cached = parseGraph(fs.readFileSync(this.graphPath, 'utf8'));
+      // Prefer SQLite reconstruct when corpusHash matches (scale past JSON parse).
+      const preferred = loadGraphPreferIndex(this.root, this.graphPath);
+      this.cached = preferred
+        ? preferred.graph
+        : parseGraph(fs.readFileSync(this.graphPath, 'utf8'));
       this.cachedMtimeMs = stat.mtimeMs;
     }
     return this.cached;
   }
 
   /**
-   * Debounced, single-flight refresh. Never throws — a refresh problem must
-   * degrade to "answer from the current map", not break the tool call.
+   * Debounced, single-flight refresh — the shared scheduler does the work (see
+   * engine/refresh-scheduler.ts). Never throws: a refresh problem must degrade
+   * to "answer from the current map", not break the tool call.
    */
-  private async maybeRefresh(): Promise<void> {
-    const now = Date.now();
-    if (!this.inflight) {
-      const interval = this.tuning.probeIntervalMs ?? this.probeIntervalMs;
-      if (now < this.failedUntil || now - this.lastProbeAt < interval) return;
-      this.lastProbeAt = now;
-      this.inflight = refreshIfStale(this.root)
-        .then((r) => {
-          if (r.status === 'error') this.failedUntil = Date.now() + FAILURE_COOLDOWN_MS;
-          // Self-tune the probe cadence to the repo's actual size: when the
-          // outcome was probe-only (no rebuild), its duration ≈ the stat-walk
-          // cost, and the next probe is spaced so probing can never take more
-          // than ~1/PROBE_DUTY_FACTOR of serve wall-time. Small repos stay at
-          // the 2s floor; a 100k-file tree self-paces toward the 30s ceiling.
-          if (r.status === 'fresh' || r.status === 'no-snapshot' || r.status === 'locked') {
-            const cost = Date.now() - now;
-            this.probeIntervalMs = Math.min(
-              MAX_PROBE_INTERVAL_MS,
-              Math.max(PROBE_INTERVAL_MS, cost * PROBE_DUTY_FACTOR),
-            );
-          }
-        })
-        .catch(() => {
-          this.failedUntil = Date.now() + FAILURE_COOLDOWN_MS;
-        })
-        .finally(() => {
-          this.inflight = null;
-        });
+  private maybeRefresh(): Promise<void> {
+    return this.refresher.maybeRefresh();
+  }
+
+  /**
+   * A COMMITTED outcome (map verified fresh, or rebuilt) clears the pending
+   * set — but only entries whose last event predates the refresh start.
+   * 'locked'/'error'/'no-snapshot' clear nothing: the map may still be behind
+   * those changes.
+   */
+  private onRefreshSettled(outcome: RefreshOutcome | null, startedAt: number): void {
+    if (outcome?.status !== 'fresh' && outcome?.status !== 'refreshed') return;
+    for (const [file, seenAt] of this.pendingChanges) {
+      if (seenAt <= startedAt) this.pendingChanges.delete(file);
     }
-    await Promise.race([this.inflight, sleep(this.tuning.refreshBudgetMs ?? REFRESH_BUDGET_MS)]);
+  }
+
+  /**
+   * Record a source change (watcher event, or a test). Arms the next probe to
+   * run immediately (bypassing the self-tuned interval — a real event is not a
+   * poll) and schedules a debounced background refresh so the rebuild happens
+   * BETWEEN tool calls instead of on the next call's 100 ms budget.
+   */
+  notePendingChange(filename: string): void {
+    this.pendingChanges.set(filename, Date.now());
+    this.refresher.arm();
+    if (!this.refresh) return;
+    if (this.watchTimer) clearTimeout(this.watchTimer);
+    this.watchTimer = setTimeout(() => {
+      this.watchTimer = null;
+      void this.maybeRefresh();
+    }, WATCH_DEBOUNCE_MS);
+    this.watchTimer.unref?.();
+  }
+
+  /**
+   * Event-driven freshness (the serve-loop watcher): a recursive `fs.watch`
+   * on the workspace feeds `notePendingChange`, so a save triggers a rebuild
+   * in ~WATCH_DEBOUNCE_MS instead of waiting out the 2–30 s poll. The poll
+   * stays armed as the fallback — on filesystems where recursive watch fails
+   * (some containers/NFS) this returns false and behaviour is unchanged.
+   */
+  startWatching(): boolean {
+    if (this.watcher) return true;
+    try {
+      this.watcher = fs.watch(this.root, { recursive: true }, (_event, filename) => {
+        if (!filename) return;
+        if (!isRelevantChange(filename)) return;
+        this.notePendingChange(filename);
+      });
+      this.watcher.unref?.();
+      return true;
+    } catch {
+      this.watcher = null;
+      return false;
+    }
+  }
+
+  stopWatching(): void {
+    this.watcher?.close();
+    this.watcher = null;
+    if (this.watchTimer) clearTimeout(this.watchTimer);
+    this.watchTimer = null;
+  }
+
+  /**
+   * In-band staleness signal for tool responses: what has changed since the
+   * last committed refresh. Null when the map is current (the common case —
+   * responses carry zero overhead then).
+   */
+  stalenessNote(): string | null {
+    const n = this.pendingChanges.size;
+    if (n === 0) return null;
+    const names = [...this.pendingChanges.keys()].sort().slice(0, 3);
+    const more = n > names.length ? `, +${n - names.length} more` : '';
+    return `map freshness: ${n} file(s) changed since the last rebuild (${names.join(', ')}${more}) — auto-refresh pending; symbol locations may have shifted`;
   }
 }
 
+/**
+ * Prefer the daemon's watcher to our own.
+ *
+ * Both notice the same edits and both drive the same incremental rebuild, so
+ * running them together means two inotify registrations over one tree and two
+ * rebuilds racing for one lock. The daemon wins when it is there: it is the
+ * process that already holds the map and, unlike this one, is shared by every
+ * other client on the machine.
+ *
+ * Standing down is conditional on the daemon *confirming* the subscription,
+ * and reversed the instant that connection drops — a dead daemon degrades this
+ * server to watching for itself, never to nothing watching at all.
+ *
+ * The confirmation has to be about *this* repository. The daemon only watches
+ * a repo once it holds that repo's slot, so a subscription it acknowledges for
+ * a workspace it has no map for would push nothing, forever — and this server
+ * would have retired its own watcher to listen to silence. Publishing first is
+ * what makes the acknowledgement mean something: it hands the daemon the map,
+ * which is what starts its watcher, and answers with the repository id to
+ * scope the subscription to.
+ */
+async function watchViaDaemonOrLocally(source: GraphSource, opts: ServeOptions): Promise<void> {
+  if (opts.daemon === false) {
+    source.startWatching();
+    return;
+  }
+  try {
+    const [{ publishGraphToVgd }, { subscribeToSlots }] = await Promise.all([
+      import('../runtime/vgd/publish.js'),
+      import('../runtime/vgd/slot-subscription.js'),
+    ]);
+    // Never starts a daemon; "not-running" simply means we watch locally.
+    const published = await publishGraphToVgd(opts.root ?? source.root);
+    if (published.status === 'published' || published.status === 'current') {
+      const subscription = await subscribeToSlots({
+        repositoryId: published.repositoryId,
+        onChange: () => source.reloadFromDisk(),
+        onDetach: () => source.resumeLocalFreshness(),
+      });
+      if (subscription.active) {
+        source.deferFreshnessToDaemon();
+        return;
+      }
+    }
+  } catch {
+    /* no daemon, or it cannot push — watch locally */
+  }
+  source.startWatching();
+}
+
 export function createServer(source: GraphSource, opts: ServeOptions = {}): Server {
-  const { savings = false, shareStats = false, local = false, dedup = false } = opts;
+  const { savings = false, shareStats = false, local = false, dedup = false, stats } = opts;
   // Recording feeds both the local `vg savings` report and the opt-in upload, so
   // enabling either turns it on. Absent both, `vg serve` records nothing.
   const record = savings || shareStats;
-  // root = the directory containing .vibgrate/ (graphPath = root/.vibgrate/graph.json)
-  const root = path.dirname(path.dirname(source.graphPath));
+  // Prefer GraphSource's explicit root (set by serve from the project cwd).
+  const root = opts.root ?? source.root;
+  // One runtime session for the life of the server: attach once, then send only
+  // the question per navigation call. Absent a daemon it stays null-returning
+  // and every tool answers exactly as it does today.
+  const semanticSession = local
+    ? undefined
+    : new DaemonSemanticSession(root, { disabled: opts.daemon === false });
   // Per-session memory of node ids whose full detail was already returned — the
   // basis for opt-in cross-call dedup (`--dedup`). Scoped to this server
   // instance so it never leaks across sessions. Node ids are content-addressed
@@ -160,18 +365,40 @@ export function createServer(source: GraphSource, opts: ServeOptions = {}): Serv
         // every step. One good navigation call usually locates the code.
         'Navigate as little as possible: one good search/query usually locates the code. ' +
         'As soon as you have the file and line, read that file and make the edit — ' +
-        'do not call further graph tools unless the edit fails or the match was wrong.',
+        'do not call further graph tools unless the edit fails or the match was wrong. ' +
+        // Library docs: position against web search (version-correct beats
+        // SEO results), and give a stopping rule so a thin doc doesn't turn
+        // into an open-ended search loop.
+        'For how-do-I-use-this-library questions call resolve_library once, then library_docs ' +
+        'with the returned targetId and a focused query: the docs are official and matched to ' +
+        'the version THIS project has installed (drift-annotated) — prefer them over web search ' +
+        'or training-data recall when they conflict. Skip them for language built-ins or APIs ' +
+        'already shown in context. If two library_docs calls have not surfaced the section you ' +
+        'need, read the package source under node_modules instead of searching again.',
     },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: TOOLS.map((t) => ({
-      name: t.name,
-      description: t.description,
-      inputSchema: t.inputSchema,
-      annotations: { readOnlyHint: true, openWorldHint: false },
-    })),
-  }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    const listed = new Set(listedToolNames(opts.toolSurface));
+    // Repo-size call budget on orient's listed description: the stop-discipline
+    // where the model decides, priced once per list, not per step. Best-effort —
+    // when no map is loadable yet the description ships without the line.
+    let budget = '';
+    try {
+      const graph = await source.get();
+      budget = budgetSuffix(new Set(graph.nodes.map((n) => n.file)).size);
+    } catch {
+      /* no map yet — plain description */
+    }
+    return {
+      tools: TOOLS.filter((t) => listed.has(t.name)).map((t) => ({
+        name: t.name,
+        description: t.name === 'orient' && budget ? `${t.description}${budget}` : t.description,
+        inputSchema: t.inputSchema,
+        annotations: { readOnlyHint: true, openWorldHint: false },
+      })),
+    };
+  });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const tool = TOOLS.find((t) => t.name === request.params.name);
@@ -186,17 +413,46 @@ export function createServer(source: GraphSource, opts: ServeOptions = {}): Serv
         'no code map found. Run `vg` in the project to build .vibgrate/graph.json, then retry.',
       );
     }
+    const startedAt = Date.now();
     try {
       const args = (request.params.arguments ?? {}) as Record<string, unknown>;
-      const result = await tool.handler(graph, args, { root, local, dedup, seen });
+      const result = await tool.handler(graph, args, {
+        root,
+        local,
+        dedup,
+        seen,
+        graphPath: source.graphPath,
+        semanticSession,
+      });
+      const ms = Date.now() - startedAt;
+      // Live, in-memory session stats for the serve status display — always on
+      // when a serve process passed them (nothing leaves the process).
+      stats?.record({ ...measureCall(tool.name, result), client: sanitizeClient(detectClient(server)), ms });
       // Opt-in, counts-only usage ledger: one entry per navigation call, with its
       // outcome, the grep-baseline token counts, and — so `vg savings` can show
       // the command-vs-MCP split and which AI is calling — the source (`mcp`) and
       // the client detected from the initialize handshake.
-      if (record) recordUsage(root, tool.name, result, detectClient(server));
+      if (record) recordUsage(root, tool.name, result, detectClient(server), ms);
       // Compact → clamp to the token ceiling → compact-serialise. See ./response.ts.
-      return renderToolResult(result);
+      const rendered = renderToolResult(result);
+      // In-band staleness (serve-loop watcher): when the working tree has
+      // drifted past the served map, say so ON the response — the agent is the
+      // one acting on possibly-moved symbols, and stderr never reaches it.
+      // Zero overhead when the map is current (the overwhelmingly common case).
+      const staleness = source.stalenessNote();
+      if (staleness) rendered.content = [...(rendered.content ?? []), { type: 'text', text: `[${staleness}]` }];
+      return rendered;
     } catch (err) {
+      // A failed call still counts in the live display — as a miss, so the
+      // operator sees trouble instead of a silently frozen dashboard.
+      stats?.record({
+        tool: tool.name,
+        client: sanitizeClient(detectClient(server)),
+        outcome: 'miss',
+        ms: Date.now() - startedAt,
+        vgTokens: 0,
+        baselineTokens: 0,
+      });
       return errorResult(`tool "${tool.name}" failed: ${(err as Error).message}`);
     }
   });
@@ -205,7 +461,9 @@ export function createServer(source: GraphSource, opts: ServeOptions = {}): Serv
 }
 
 export async function serveStdio(graphPath: string, opts: ServeOptions = {}): Promise<void> {
-  const source = new GraphSource(graphPath, opts.refresh !== false);
+  const source = new GraphSource(graphPath, opts.refresh !== false, { root: opts.root });
+  const wantWatch = opts.refresh !== false && opts.watch !== false;
+  if (wantWatch) await watchViaDaemonOrLocally(source, opts);
   const server = createServer(source, opts);
   // Start the semantic-model warm-up as soon as the server boots, so the first
   // orient/query_graph doesn't pay a cold download. Non-blocking: navigation
@@ -214,12 +472,6 @@ export async function serveStdio(graphPath: string, opts: ServeOptions = {}): Pr
   await server.connect(new StdioServerTransport());
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    timer.unref?.(); // never keep the server process alive just for the budget timer
-  });
-}
 
 /**
  * Append a counts-only usage entry for a navigation call: which tool, how it
@@ -233,12 +485,23 @@ function sleep(ms: number): Promise<void> {
  * set that (get_node never did), so the old code recorded nothing under normal
  * concise usage and `vg savings` always reported "recording is off".
  */
-export function recordUsage(root: string, tool: string, result: unknown, client?: string): void {
+export function recordUsage(root: string, tool: string, result: unknown, client?: string, ms?: number): void {
+  recordSaving(
+    root,
+    { ...measureCall(tool, result), source: 'mcp', client: sanitizeClient(client), ...(ms !== undefined ? { ms } : {}) },
+    Date.now(),
+  );
+}
+
+/**
+ * Measure one tool call for the ledger and the live session stats: its outcome
+ * plus — for the grep-baseline tools only — the context tokens vg returned and
+ * the baseline they replaced (other tools report zeros, meaning "no baseline").
+ */
+function measureCall(tool: string, result: unknown): { tool: string; outcome: Outcome; vgTokens: number; baselineTokens: number } {
   const outcome = classifyOutcome(result);
   let vgTokens = 0;
   let baselineTokens = 0;
-  // Token savings are only meaningful for the tools with a grep/read baseline;
-  // other tools still record their outcome for the per-command breakdown.
   if (SAVINGS_TOOLS.has(tool) && result && typeof result === 'object') {
     vgTokens = countTokens(renderedText(renderToolResult(result)));
     // Grep/read baseline: ~PER_FILE_TOKENS per distinct file the answer points
@@ -247,11 +510,7 @@ export function recordUsage(root: string, tool: string, result: unknown, client?
     // `file` plus the files of the callers/callees it returned in one call.
     baselineTokens = referencedFiles(result).size * PER_FILE_TOKENS;
   }
-  recordSaving(
-    root,
-    { tool, outcome, vgTokens, baselineTokens, source: 'mcp', client: sanitizeClient(client) },
-    Date.now(),
-  );
+  return { tool, outcome, vgTokens, baselineTokens };
 }
 
 /**

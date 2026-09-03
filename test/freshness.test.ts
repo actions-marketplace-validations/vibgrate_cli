@@ -72,6 +72,35 @@ describe('freshness probe', () => {
     const snap = loadSnapshot(dir)!;
     expect(snap.files['src/math.ts'].mtimeMs).toBe(fs.statSync(abs).mtimeMs);
   });
+
+  it('does not report permanent drift for document files tracked in the snapshot', async () => {
+    // Build with docs present in fileStats (README etc.). Probe must include
+    // discoverDocs so status stays clean after build/refresh.
+    const withDocs = makeProject({
+      ...SAMPLE_FILES,
+      'README.md': '# Hello\n',
+      '.github/workflows/ci.yml': 'name: ci\non: push\njobs: {}\n',
+      'package.json': JSON.stringify({ name: 'demo', dependencies: {} }),
+    });
+    try {
+      const result = await buildGraph({
+        root: withDocs,
+        inline: true,
+        generatedAt: '2020-01-01T00:00:00.000Z',
+      });
+      writeArtifacts(result.graph, { root: withDocs, html: false, report: false });
+      writeSnapshot(withDocs, result.graph.provenance.corpusHash, result.fileStats, {});
+      const probe = probeFreshness(withDocs)!;
+      expect(hasDrift(probe.drift)).toBe(false);
+      // Docs are in the snapshot and re-discovered.
+      expect(probe.drift.removed).not.toContain('README.md');
+      expect(Object.keys(loadSnapshot(withDocs)!.files).some((f) => f.endsWith('.md') || f.includes('package.json'))).toBe(
+        true,
+      );
+    } finally {
+      cleanup(withDocs);
+    }
+  });
 });
 
 describe('refreshIfStale', () => {
@@ -123,7 +152,7 @@ describe('refreshIfStale', () => {
 describe('GraphSource auto-refresh (vg serve)', () => {
   it('serves the rebuilt graph after files change', async () => {
     const graphPath = path.join(dir, '.vibgrate', 'graph.json');
-    const source = new GraphSource(graphPath, true, { probeIntervalMs: 0 });
+    const source = new GraphSource(graphPath, true, { probeIntervalMs: 0, root: dir });
     const first = await source.get();
     expect(first.nodes.some((n) => n.qualifiedName.endsWith('quadruple'))).toBe(false);
 
@@ -134,10 +163,48 @@ describe('GraphSource auto-refresh (vg serve)', () => {
 
   it('with refresh off, keeps serving the map as built', async () => {
     const graphPath = path.join(dir, '.vibgrate', 'graph.json');
-    const source = new GraphSource(graphPath, false);
+    const source = new GraphSource(graphPath, false, { root: dir });
     await source.get();
     editFile(dir, 'src/math.ts', 'export function quintuple(x: number): number { return x * 5; }\n');
     const graph = await source.get();
     expect(graph.nodes.some((n) => n.qualifiedName.endsWith('quintuple'))).toBe(false);
+  });
+
+  it('does not block get() longer than the refresh micro-budget (release-bench regression)', async () => {
+    // 2026.725.3: a multi-second refresh budget let every sequential tool call
+    // on a large repo stall for ~5s while a rebuild ran (ts p50 → 5261ms on
+    // vg-cli-public). The budget is a micro-window so warm probes can land;
+    // heavy work must not pin MCP latency to REFRESH_BUDGET_MS.
+    const graphPath = path.join(dir, '.vibgrate', 'graph.json');
+    const budgetMs = 40;
+    const source = new GraphSource(graphPath, true, {
+      probeIntervalMs: 0,
+      refreshBudgetMs: budgetMs,
+      root: dir,
+      refreshImpl: async () => {
+        await new Promise((r) => setTimeout(r, 1500));
+        return { status: 'fresh' };
+      },
+    });
+    const t0 = Date.now();
+    await source.get();
+    const elapsed = Date.now() - t0;
+    expect(elapsed).toBeLessThan(budgetMs + 120);
+    expect(elapsed).toBeGreaterThanOrEqual(budgetMs - 5);
+  });
+
+  it('threads graphPath into refresh so writeArtifacts never re-resolves via git', async () => {
+    const graphPath = path.join(dir, '.vibgrate', 'graph.json');
+    let seenPath: string | undefined;
+    const source = new GraphSource(graphPath, true, {
+      probeIntervalMs: 0,
+      root: dir,
+      refreshImpl: async (_root, opts) => {
+        seenPath = opts?.graphPath;
+        return { status: 'fresh' };
+      },
+    });
+    await source.get();
+    expect(seenPath).toBe(graphPath);
   });
 });

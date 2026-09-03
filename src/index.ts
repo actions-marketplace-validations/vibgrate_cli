@@ -15,7 +15,14 @@ export type { ResourceLimits } from './engine/limits.js';
 
 export { loadGraph } from './engine/load.js';
 export { serializeGraph, parseGraph, stableStringify } from './engine/serialize.js';
-export { writeArtifacts, defaultGraphPath, vibgrateDir } from './engine/artifacts.js';
+export {
+  writeArtifacts,
+  defaultGraphPath,
+  resolveGraphPath,
+  legacyGraphPath,
+  preferInRepoGraph,
+  vibgrateDir,
+} from './engine/artifacts.js';
 export type { WriteOptions, WrittenArtifacts } from './engine/artifacts.js';
 export { verifyDeterminism } from './engine/verify.js';
 export type { VerifyResult } from './engine/verify.js';
@@ -36,7 +43,15 @@ export type { FileParse } from './engine/types.js';
 // Phase 1 — query, navigation, analysis, MCP.
 export { queryGraph, queryGraphSemantic, identifierParts } from './engine/query.js';
 export type { QueryOptions, QueryResult, QueryMatch, SemanticQueryOptions } from './engine/query.js';
-export { loadEmbedder, getNodeEmbeddings, cosine, nodeEmbedText } from './engine/embeddings.js';
+export {
+  loadEmbedder,
+  getNodeEmbeddings,
+  cosine,
+  nodeEmbedText,
+  embeddingsPath,
+  embeddingsPathFor,
+  embeddingsCached,
+} from './engine/embeddings.js';
 export type { Embedder, LoadEmbedderOptions } from './engine/embeddings.js';
 export { findNodes, resolveOne, nodeById } from './engine/lookup.js';
 export { impactOf } from './engine/impact.js';
@@ -82,3 +97,49 @@ export type { ExportFormat, ExportContext } from './engine/export.js';
 export { buildEnvelope, redactGraph } from './engine/push.js';
 export type { GraphUploadEnvelope } from './engine/push.js';
 export { grammarsSourceDir } from './engine/grammars.js';
+
+// Fusion — source-bearing Context Capsule (ContextBench / agent-suite lockstep).
+// `moduleInstalled` is exported so a benchmark harness can record WHICH
+// relevance module produced a run: the module resolves from the npm registry at
+// run time, so without this a report cannot be attributed to a module version.
+export { moduleInstalled as relevanceModuleInstalled } from './install/relevance-module.js';
+// The ranking seam itself. A harness that compiles a capsule WITHOUT calling
+// `rankQuestion` measures the module-less mechanical fallback, not the shipped
+// path (`vg code` / `vg ask` / the MCP server all rank first, then compile), and
+// silently reports `relevanceVersion: null`. Exported so token-bench can run the
+// same two steps in the same order.
+export { rankQuestion, loadRelevanceProvider } from './engine/relevance-provider.js';
+export type { SanitizedRank, RankedSeed, RelevanceProvider } from './engine/relevance-provider.js';
+export { loadTopicTags } from './engine/relevance-enrich.js';
+export { userAskFromInstruction, rankingAskFrom } from './engine/user-ask.js';
+export {
+  buildTaskCapsule,
+  capsuleToCodeContext,
+  summarizeCapsule,
+  TASK_CAPSULE_SCHEMA_VERSION,
+  CAPSULE_RANKING_VERSION,
+  CAPSULE_COMPILER_ID,
+} from './code/capsule.js';
+export {
+  capsuleMode,
+  rankConfidenceOf,
+  MIN_RANK_CONFIDENCE,
+  buildWholeRepoPacket,
+  askNamesSymbol,
+  mappedFilePaths,
+  sourceTokenMass,
+  WHOLE_REPO_MAX_SOURCE_TOKENS,
+  COMPILE_MIN_SOURCE_TOKENS,
+} from './code/capsule-mode.js';
+export type { CapsuleMode, WholeRepoPacket, WholeRepoFile } from './code/capsule-mode.js';
+export type {
+  TaskCapsule,
+  BuildCapsuleOptions,
+  CapsuleSummary,
+  CapsuleSymbolRef,
+  SourceSlice,
+} from './code/capsule.js';
+export { buildCodeContext } from './code/context.js';
+export type { BuildContextOptions } from './code/context.js';
+export { searchSymbols } from './engine/search.js';
+export type { SearchResult, SymbolHit, TextHit } from './engine/search.js';

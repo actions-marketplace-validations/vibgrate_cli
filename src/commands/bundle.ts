@@ -2,9 +2,14 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Command } from 'commander';
 import { resolvedGrammarFiles, grammarSetVersion } from '../engine/grammars.js';
-import { defaultGraphPath } from '../engine/artifacts.js';
+import {
+  TOOLCHAIN_GRAMMARS,
+  resolveToolchainGrammar,
+} from '../engine/toolchain/grammars.js';
+import { resolveGraphPath } from '../engine/artifacts.js';
 import { catalogPath, libDir } from '../engine/lib.js';
-import { stableStringify } from '../engine/serialize.js';
+import { serializeGraph, stableStringify } from '../engine/serialize.js';
+import { loadGraphFileWithSnapshot } from '../engine/snapshot.js';
 import { VERSION } from '../version.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { rootOf } from './util.js';
@@ -21,7 +26,8 @@ export function registerBundle(program: Command): void {
   const cmd = program
     .command('bundle')
     .description('build an air-gapped bundle (grammars + graph + library catalog)')
-    .option('--offline', 'offline bundle (default; present for clarity)')
+    // `--offline` was a no-op here ("default; present for clarity") and is now
+    // a global flag, so `vg bundle --offline` still parses exactly as before.
     .option('-o, --out <dir>', 'output directory', 'vg-bundle')
     .action(function (this: Command, opts: { out?: string }) {
       const global = readGlobal(this);
@@ -43,13 +49,32 @@ export function registerBundle(program: Command): void {
         fs.copyFileSync(absPath, path.join(outDir, 'grammars', fileName));
         grammarCount++;
       }
+      // Toolchain grammars (infrastructure/CI corpus) resolve through their own
+      // registry — without them an air-gapped bundle would silently lose
+      // structural IaC extraction. A missing one is not fatal: extraction for
+      // that format degrades, exactly as it does outside a bundle.
+      for (const id of Object.keys(TOOLCHAIN_GRAMMARS).sort()) {
+        const absPath = resolveToolchainGrammar(id);
+        if (!absPath) continue;
+        fs.copyFileSync(absPath, path.join(outDir, 'grammars', path.basename(absPath)));
+        grammarCount++;
+      }
 
       const included: string[] = [`grammars/ (${grammarCount} .wasm)`];
 
-      const graphSrc = global.graph ?? defaultGraphPath(root);
+      // Bundles are an interchange surface, so the graph always ships as
+      // canonical JSON — materialized from the binary snapshot when the
+      // global store holds only that (store-mode builds skip the JSON write).
+      const graphSrc = resolveGraphPath(root, global.graph);
       if (fs.existsSync(graphSrc)) {
         fs.copyFileSync(graphSrc, path.join(outDir, 'graph.json'));
         included.push('graph.json');
+      } else {
+        const graph = loadGraphFileWithSnapshot(graphSrc);
+        if (graph) {
+          fs.writeFileSync(path.join(outDir, 'graph.json'), serializeGraph(graph));
+          included.push('graph.json');
+        }
       }
 
       const cat = catalogPath(root);

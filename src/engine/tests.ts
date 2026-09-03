@@ -2,7 +2,7 @@ import { edgeId } from './ids.js';
 import type { GraphEdge, GraphNode } from '../schema.js';
 
 /**
- * Test-awareness (VG-ENGINE-TEARDOWN §3.6) — the wedge Graphify has no answer to.
+ * Test-awareness (VG-ENGINE-TEARDOWN §3.6).
  *
  * Deterministic, two signals:
  *  1. **Static linkage** — calls from a test file into product code become `test`
@@ -30,6 +30,7 @@ export function isTestFile(rel: string): boolean {
   if (/[A-Za-z0-9](Test|Tests|IT)\.java$/.test(base)) return true; // *Test.java (CamelCase)
   if (/_spec\.rb$/.test(lbase) || /_test\.rb$/.test(lbase)) return true; // Ruby
   if (/[A-Za-z0-9](Test|Tests)\.cs$/.test(base)) return true; // *Test.cs (CamelCase)
+  if (/[A-Za-z0-9](Test|Tests)\.swift$/.test(base)) return true; // XCTest *Tests.swift (CamelCase)
   return false;
 }
 

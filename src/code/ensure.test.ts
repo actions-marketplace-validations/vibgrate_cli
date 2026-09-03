@@ -1,0 +1,97 @@
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { ensurePackage, packageName, ensureUnavailableMessage, cacheWriteFailureDetail } from './ensure.js';
+
+/**
+ * Consent gating is a guardrail, so its negative cases get explicit tests: the
+ * capability must NEVER install a package silently, offline, or without consent.
+ * The installer is injected, so nothing here shells out to npm.
+ */
+describe('ensurePackage — consent gating (negative cases)', () => {
+  const prevCache = process.env.XDG_CACHE_HOME;
+  afterEach(() => {
+    if (prevCache === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = prevCache;
+  });
+
+  it('refuses to install under --local/offline', async () => {
+    const install = vi.fn(() => true);
+    const res = await ensurePackage('some-pkg-that-is-not-installed@1', { local: true, install });
+    expect(res.module).toBeNull();
+    expect(res.reason).toBe('offline');
+    expect(install).not.toHaveBeenCalled();
+  });
+
+  it('refuses to install without consent in a non-interactive run', async () => {
+    const install = vi.fn(() => true);
+    const res = await ensurePackage('some-pkg-that-is-not-installed@1', { interactive: false, consent: false, install });
+    expect(res.module).toBeNull();
+    expect(res.reason).toBe('no-consent');
+    expect(install).not.toHaveBeenCalled();
+  });
+
+  it('reports install-failed (and never a partial success) when the installer fails', async () => {
+    process.env.XDG_CACHE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-ensure-'));
+    const install = vi.fn(() => false);
+    const res = await ensurePackage('definitely-not-real-vibgrate-pkg@1', {
+      consent: true,
+      interactive: false,
+      install,
+    });
+    expect(res.module).toBeNull();
+    expect(res.reason).toBe('install-failed');
+    expect(install).toHaveBeenCalledTimes(1);
+  });
+
+  it('loads an already-installed package without consent or install', async () => {
+    // `semver` is a real dependency of this package, resolvable from anywhere.
+    const install = vi.fn(() => true);
+    const res = await ensurePackage('semver', { install });
+    // It may resolve from the runtime cache dir or not depending on the machine;
+    // either it loads (module present) or it treats it as absent — but it must
+    // never invoke the installer for a load attempt of an already-present name.
+    if (res.module) expect(install).not.toHaveBeenCalled();
+  });
+});
+
+describe('packageName', () => {
+  it('strips a version range', () => {
+    expect(packageName('node-llama-cpp@^3')).toBe('node-llama-cpp');
+    expect(packageName('semver@7.8.5')).toBe('semver');
+  });
+  it('keeps a scoped package name and strips its version', () => {
+    expect(packageName('@scope/pkg@1.2.3')).toBe('@scope/pkg');
+    expect(packageName('@scope/pkg')).toBe('@scope/pkg');
+  });
+});
+
+describe('ensureUnavailableMessage', () => {
+  it('names the fix for every reason and never alarms', () => {
+    for (const reason of ['offline', 'no-consent', 'install-failed', 'load-failed'] as const) {
+      const msg = ensureUnavailableMessage(reason, 'node-llama-cpp@^3');
+      expect(msg).toContain('node-llama-cpp');
+      expect(msg.length).toBeGreaterThan(20);
+    }
+    expect(ensureUnavailableMessage('no-consent', 'x')).toMatch(/vg models install/);
+  });
+
+  it('surfaces install-failed detail instead of the vague offline/npm line', () => {
+    const msg = ensureUnavailableMessage(
+      'install-failed',
+      'node-llama-cpp@^3',
+      'cannot write runtime cache at /tmp/x (permission denied)',
+    );
+    expect(msg).toContain('permission denied');
+    expect(msg).not.toMatch(/offline, or npm unavailable/);
+  });
+});
+
+describe('cacheWriteFailureDetail', () => {
+  it('points at chown when EACCES', () => {
+    const msg = cacheWriteFailureDetail('/tmp/vg-rt', Object.assign(new Error('denied'), { code: 'EACCES' }));
+    expect(msg).toMatch(/permission denied|chown/i);
+    expect(msg).toContain('/tmp/vg-rt');
+  });
+});

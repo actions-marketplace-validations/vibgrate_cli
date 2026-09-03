@@ -17,9 +17,12 @@ import { registerInsights } from './commands/insights.js';
 import { registerImpact } from './commands/impact.js';
 import { registerUnknowns } from './commands/unknowns.js';
 import { registerServe } from './commands/serve.js';
+import { registerLsp } from './commands/lsp.js';
 import { registerInstall } from './commands/install.js';
+import { registerModule } from './commands/module.js';
+import { registerHook } from './commands/hook.js';
 import { registerShare } from './commands/share.js';
-import { registerBenchmark } from './commands/benchmark.js';
+import { registerWatch } from './commands/watch.js';
 import { registerTests } from './commands/tests.js';
 import { registerFacts } from './commands/facts.js';
 import { registerGuide } from './commands/guide.js';
@@ -27,10 +30,17 @@ import { registerWhy } from './commands/why.js';
 import { registerBisect } from './commands/bisect.js';
 import { registerDrift } from './commands/drift.js';
 import { registerModels } from './commands/models.js';
+import { registerCode } from './commands/code.js';
 import { registerSavings } from './commands/savings.js';
 import { registerLib } from './commands/lib.js';
 import { registerExport } from './commands/export.js';
 import { registerBundle } from './commands/bundle.js';
+import { registerDoctor } from './commands/doctor.js';
+import { registerDaemon } from './commands/daemon.js';
+import { registerPolicy } from './commands/policy.js';
+import { registerLlmHost } from './commands/llm-host.js';
+import { registerHcs } from './commands/hcs.js';
+import { registerReview } from './commands/review.js';
 import { CliError, ExitCode } from './util/exit.js';
 import { c, info, disableColor } from './util/output.js';
 
@@ -45,8 +55,11 @@ import { dsnCommand } from './reporting/commands/dsn.js';
 import { loginCommand } from './reporting/commands/login.js';
 import { logoutCommand } from './reporting/commands/logout.js';
 import { pushCommand } from './reporting/commands/push.js';
+import { registerLocale } from './reporting/commands/locale/index.js';
 import { updateCommand } from './reporting/commands/update.js';
 import { sbomCommand } from './reporting/commands/sbom.js';
+import { evidenceCommand } from './reporting/commands/evidence/index.js';
+import { kickRelevanceReadiness } from './install/relevance-module.js';
 
 /** The set of registered subcommand names (kept in sync with registration). */
 export const KNOWN_COMMANDS = new Set([
@@ -66,6 +79,7 @@ export const KNOWN_COMMANDS = new Set([
   'bisect',
   'drift',
   'models',
+  'code',
   'savings',
   'lib',
   'export',
@@ -76,10 +90,19 @@ export const KNOWN_COMMANDS = new Set([
   'areas',
   'oddities',
   'serve',
+  'lsp',
+  'doctor',
+  'module',
+  'daemon',
+  'policy',
+  'review',
+  'llm-host',
+  'hcs',
   'install',
   'uninstall',
   'share',
-  'benchmark',
+  'watch',
+  'hook',
   'help',
   // Drift-reporting verbs (merged from the Vibgrate CLI).
   'init',
@@ -92,6 +115,9 @@ export const KNOWN_COMMANDS = new Set([
   'dsn',
   'update',
   'sbom',
+  'evidence',
+  'locale',
+  'localize',
 ]);
 
 export function buildProgram(): Command {
@@ -135,9 +161,12 @@ export function buildProgram(): Command {
   registerImpact(program);
   registerUnknowns(program);
   registerServe(program);
+  registerLsp(program);
   registerInstall(program);
+  registerModule(program);
+  registerHook(program);
   registerShare(program);
-  registerBenchmark(program);
+  registerWatch(program);
   registerTests(program);
   registerFacts(program);
   registerGuide(program);
@@ -145,10 +174,17 @@ export function buildProgram(): Command {
   registerBisect(program);
   registerDrift(program);
   registerModels(program);
+  registerCode(program);
   registerSavings(program);
   registerLib(program);
   registerExport(program);
   registerBundle(program);
+  registerDoctor(program);
+  registerDaemon(program);
+  registerPolicy(program);
+  registerLlmHost(program);
+  registerHcs(program);
+  registerReview(program);
 
   // Drift-reporting commands (merged from the Vibgrate CLI). `push` here is the
   // real scan-artifact upload, so it replaces the graph engine's no-op `push`.
@@ -163,6 +199,8 @@ export function buildProgram(): Command {
   program.addCommand(pushCommand);
   program.addCommand(updateCommand);
   program.addCommand(sbomCommand);
+  program.addCommand(evidenceCommand);
+  registerLocale(program);
 
   return program;
 }
@@ -189,6 +227,7 @@ const VALUE_FLAGS = new Set([
   '--only',
   '--exclude',
   '--export',
+  '--out',
   '-o',
   '--budget',
   '-b',
@@ -294,6 +333,15 @@ export async function main(argv = process.argv): Promise<void> {
   // Honor NO_COLOR / --no-color early so even bootstrap messages obey it.
   if (process.env.NO_COLOR || raw.includes('--no-color')) disableColor();
 
+  // Relevance-module readiness: every `vg` invocation silently kicks a
+  // throttled background provision attempt so the ranking engine is present
+  // by the time `vg ask` / `vg code` need it (those paths retry once,
+  // bounded, then fall back mechanically). Never blocks, never prints;
+  // VIBGRATE_NO_KERNEL / a recorded decline / --local skip it entirely.
+  // Both flags suppress it: `--offline` says "no network", and `--local`
+  // implies that. Read from raw argv because this runs before commander parses.
+  if (!raw.includes('--local') && !raw.includes('--offline')) kickRelevanceReadiness();
+
   // We need cwd for path-based dispatch; read -C/--cwd from the raw args.
   const cwd = readCwd(raw);
 
@@ -335,12 +383,26 @@ function handleError(err: unknown): never {
     // Unknown command / bad option / missing argument → usage error.
     process.exit(ExitCode.USAGE_ERROR);
   }
+  // Host UIs (`vg code --stream-json`) only render NDJSON on stdout. Mirror the
+  // failure there so the panel is never left hanging after a human stderr line.
+  const streamJsonHost =
+    process.argv.includes('--stream-json') || process.env.VG_CODE_STREAM_JSON === '1';
+  const emitHostError = (message: string): void => {
+    if (!streamJsonHost) return;
+    try {
+      process.stdout.write(JSON.stringify({ event: 'error', message }) + '\n');
+    } catch {
+      /* stdout closed */
+    }
+  };
   if (err instanceof CliError) {
+    emitHostError(err.message);
     info(c.red(`error: ${err.message}`));
     process.exit(err.code);
   }
   const message = err instanceof Error ? err.message : String(err);
   const correlation = Math.random().toString(36).slice(2, 10);
+  emitHostError(message);
   info(c.red(`error: ${message}`));
   info(c.dim(`  (ref ${correlation}) — re-run with --json for detail, or report at https://vibgrate.com/help`));
   process.exit(ExitCode.ERROR);

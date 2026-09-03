@@ -7,15 +7,20 @@ import { verifyDeterminism } from '../engine/verify.js';
 import { epistemicBreakdown } from '../engine/epistemic.js';
 import { signGraphAttestation, verifyGraphAttestation, type SignSummary } from './attest-actions.js';
 import { isModelReady, countPending, resolveEmbedModel } from '../engine/embeddings.js';
+import { attachVgd } from '../runtime/vgd/attach.js';
+import { ActivityLog } from '../runtime/vgd/activity.js';
 import type { VgGraph } from '../schema.js';
 import { writeArtifacts } from '../engine/artifacts.js';
 import { writeSnapshot } from '../engine/freshness.js';
+import { refreshInstalledInstructions, SMALL_REPO_FILES } from '../install/registry.js';
+import { writeAreaSkills } from '../install/area-skills.js';
 import { serializeGraph } from '../engine/serialize.js';
 import { renderReport } from '../engine/report.js';
 import { renderHtml } from '../engine/html.js';
-import { UsageError } from '../engine/discover.js';
+import { UsageError, mergeExcludes } from '../engine/discover.js';
 import { ResourceLimitError } from '../engine/limits.js';
 import { CliError, ExitCode, usageError } from '../util/exit.js';
+import { resolveSelfJsEntry } from '../util/cli-invocation.js';
 import { c, info, out, json } from '../util/output.js';
 import { printLogo } from '../util/logo.js';
 import { ProgressBar } from '../util/progress.js';
@@ -33,6 +38,9 @@ interface BuildCmdOpts {
   export?: string;
   warm?: boolean;
   grammars?: string;
+  fast?: boolean;
+  index?: boolean;
+  analysisTier?: string;
   attest?: boolean;
   verify?: boolean;
   attestKey?: string;
@@ -54,6 +62,9 @@ export function registerBuild(program: Command): void {
     .option('--scip <file>', 'ingest a SCIP index for precise resolution (default: auto-detect index.scip)')
     .option('--no-scip', 'ignore any SCIP index')
     .option('--no-tsc', 'skip the in-process TypeScript resolver (heuristic floor only)')
+    .option('--fast', 'skip precise tsc resolve (heuristic only — faster XL cold builds)')
+    .option('--no-index', 'do not write the SQLite serve index under .vibgrate/cache/')
+    .option('--analysis-tier <tier>', 'force analysis tier: full | large | xl (default: auto)')
     .option('--no-warm', 'do not warm the semantic index in the background after building')
     .option('--grammars <dir>', 'directory of grammar .wasm files (offline / air-gapped)')
     .option('-o, --export <file>', 'also write the map to a file (format inferred)')
@@ -68,10 +79,16 @@ export function registerBuild(program: Command): void {
   applyGlobalOptions(cmd);
 }
 
+export interface RunBuildHooks {
+  /** Invoked during the parse phase (even under --quiet / non-TTY hosts). */
+  onParseProgress?: (done: number, total: number) => void;
+}
+
 export async function runBuild(
   paths: string[],
   opts: BuildCmdOpts,
   global: GlobalOpts,
+  hooks?: RunBuildHooks,
 ): Promise<void> {
   const root = path.resolve(global.cwd ?? '.');
 
@@ -84,7 +101,7 @@ export async function runBuild(
 
   // Brand banner + live parse progress for an interactive human while the index
   // builds (TTY only; both are no-ops under --json/--quiet/pipe so machine output
-  // stays clean).
+  // stays clean). Hosts can still receive progress via hooks.onParseProgress.
   const interactive = !global.json && !global.quiet;
   if (interactive) printLogo(path.basename(root) || root);
   const bar = interactive ? new ProgressBar(c.dim('parsing')) : undefined;
@@ -94,6 +111,12 @@ export async function runBuild(
   }
 
   const only = opts.only ? opts.only.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
+  const tierRaw = opts.analysisTier?.toLowerCase();
+  const analysisTier =
+    tierRaw === 'full' || tierRaw === 'large' || tierRaw === 'xl' ? tierRaw : undefined;
+  if (opts.analysisTier && !analysisTier) {
+    throw usageError(`--analysis-tier must be full, large, or xl (got "${opts.analysisTier}")`);
+  }
   let result;
   try {
     result = await buildGraph({
@@ -108,8 +131,14 @@ export async function runBuild(
       scip: typeof opts.scip === 'string' ? opts.scip : undefined,
       noScip: opts.scip === false,
       noTsc: opts.tsc === false,
+      fast: opts.fast === true,
+      noIndex: opts.index === false,
+      analysisTier,
       generatedAt: global.generatedAt,
-      onParseProgress: bar ? (done, total) => bar.update(done, total) : undefined,
+      onParseProgress: (done, total) => {
+        bar?.update(done, total);
+        hooks?.onParseProgress?.(done, total);
+      },
       grammarsDir: opts.grammars,
     });
   } catch (err) {
@@ -136,7 +165,7 @@ export async function runBuild(
   if (!global.graph) {
     writeSnapshot(root, result.graph.provenance.corpusHash, result.fileStats, {
       only,
-      exclude: opts.exclude,
+      exclude: mergeExcludes(root, opts.exclude),
       paths: paths.length ? paths : undefined,
       deep: global.deep,
       noGround: opts.ground === false,
@@ -147,7 +176,54 @@ export async function runBuild(
     });
   }
 
+  // The map is on disk now — start the local runtime if it is not up, and hand
+  // it the map. `vg build` used to leave the daemon at `0 graph slot(s)` no
+  // matter how many times it ran. Done here rather than with the summary below
+  // so a `--json` build (which returns early) warms the daemon too; the notice
+  // is printed in order later.
+  const activity = new ActivityLog();
+  await activity.time(
+    'attach',
+    () => attachVgd(root, { graphPath: global.graph, disabled: global.daemon === false }),
+    (a) => {
+      if (a.status !== 'attached') return { outcome: 'skip' as const, detail: `${a.reason} — the map stays on disk only` };
+      const started = a.started ? 'started vgd' : 'attached to vgd';
+      if (a.published?.status === 'published') {
+        return { outcome: 'ok' as const, detail: `${started} · map published ${a.published.gitRef} · ${a.published.nodeCount} nodes · semantic index warming` };
+      }
+      if (a.published?.status === 'failed') {
+        return { outcome: 'warn' as const, detail: `${started} · map not published (${a.published.error})` };
+      }
+      return { outcome: 'ok' as const, detail: started };
+    },
+  );
+
   if (opts.export) writeExport(result.graph, opts.export);
+
+  // Bring previously-installed assistant instructions (skill/nudge files from
+  // `vg install`) up to the current content version — so evolved instructions
+  // reach this repo the first time a new CLI builds here. Only files carrying
+  // vg's own version marker (or the exact legacy generated content) are
+  // touched; a custom --graph build is an explicit artifact and skips this.
+  if (!global.graph) {
+    const fileCount = result.graph.nodes.filter((n) => n.kind === 'file').length;
+    const refreshed = refreshInstalledInstructions(root, fileCount > 0 && fileCount < SMALL_REPO_FILES);
+    if (interactive) {
+      for (const r of refreshed) {
+        info(c.dim(`vg · refreshed assistant instructions ${r.file} (v${r.from} → v${r.to})`));
+      }
+    }
+    // Per-area skills: off unless vibgrate.config.json sets areaSkills: true.
+    // When on, deterministic content → zero churn if the graph didn't change.
+    const areaChanges = writeAreaSkills(root, result.graph);
+    if (interactive && (areaChanges.written.length || areaChanges.removed.length)) {
+      const parts = [
+        areaChanges.written.length ? `${areaChanges.written.length} area skill(s) updated` : '',
+        areaChanges.removed.length ? `${areaChanges.removed.length} stale removed` : '',
+      ].filter(Boolean);
+      info(c.dim(`vg · ${parts.join(', ')}`));
+    }
+  }
 
   // `--attest`: sign the freshly-built graph → .vibgrate/attestation.intoto.jsonl.
   let attestation: SignSummary | undefined;
@@ -179,6 +255,7 @@ export async function runBuild(
       attestation,
       timingMs: result.timing.totalMs,
       warnings: result.warnings,
+      activity: activity.toJSON(),
     });
     return;
   }
@@ -235,6 +312,8 @@ export async function runBuild(
       ),
     );
   }
+
+  for (const line of activity.render()) info(line);
 
   maybeWarmEmbeddings(root, result.graph, global, opts.warm !== false);
 }
@@ -306,9 +385,9 @@ async function verifyGraph(root: string, opts: BuildCmdOpts, global: GlobalOpts)
  * `vg embed --bg [--download]`; a lock prevents it racing a foreground `ask`.
  */
 function maybeWarmEmbeddings(root: string, graph: VgGraph, global: GlobalOpts, warm: boolean): void {
-  if (!warm || global.json || global.quiet || global.local) return;
+  if (!warm || global.json || global.quiet || global.offline) return;
   if (!process.stdout.isTTY && !process.stderr.isTTY) return;
-  const cli = process.argv[1];
+  const cli = resolveSelfJsEntry() ?? process.argv[1];
   if (!cli) return;
   const modelId = resolveEmbedModel();
   const ready = isModelReady(modelId);
@@ -320,7 +399,17 @@ function maybeWarmEmbeddings(root: string, graph: VgGraph, global: GlobalOpts, w
     ? [cli, 'embed', '-C', root, '--bg']
     : [cli, 'embed', '-C', root, '--bg', '--download'];
   try {
-    const child = spawn(process.execPath, args, { detached: true, stdio: 'ignore' });
+    // On Windows, `detached` (DETACHED_PROCESS) would strip the child of any
+    // console, making every console-subsystem grandchild (git, node) pop a
+    // visible console window; windowsHide gives it a windowless console the
+    // grandchildren inherit. Children outlive their parent on Windows anyway,
+    // so nothing is lost. POSIX keeps detached so the warm survives the
+    // terminal closing.
+    const child = spawn(process.execPath, args, {
+      detached: process.platform !== 'win32',
+      stdio: 'ignore',
+      windowsHide: true,
+    });
     child.unref();
     info(
       c.dim(

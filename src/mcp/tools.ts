@@ -1,14 +1,25 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { queryGraph, queryGraphSemantic } from '../engine/query.js';
+import type { DaemonSemanticSession } from '../runtime/vgd/semantic-client.js';
+import { rankQuestion } from '../engine/relevance-provider.js';
+import { rankingAskFrom } from '../engine/user-ask.js';
+import { loadTopicTags } from '../engine/relevance-enrich.js';
 import { loadEmbedder, getNodeEmbeddings, isModelReady, withTimeout, type Embedder } from '../engine/embeddings.js';
 import { resolveOne } from '../engine/lookup.js';
 import { indexFor } from '../engine/relations.js';
-import { shortestPath } from '../engine/paths.js';
+import { pathDisconnect, shortestPath } from '../engine/paths.js';
 import { impactOf } from '../engine/impact.js';
 import { coveringTests } from '../engine/test-query.js';
+import { loadOrDiscoverFederation } from '../runtime/federation.js';
+import { highConfidenceBridges } from '../runtime/bridge-edges.js';
+import { repositoryIdFromRoot } from '../runtime/paths.js';
+import { parseGraph } from '../engine/serialize.js';
 import { loadVulnerabilities, filterBySeverity, resolvePackageTarget, openFixableAdvisories } from './vuln-data.js';
 import { attributedInventory } from './attribution.js';
 import { computeUpgradeImpact, getChangelogSignals, type VulnSeverity } from '../core-open/index.js';
 import { discoverModels } from '../engine/models.js';
+import { assessProposedChange } from '../review/mcp-assess.js';
 import { FREE_PACK } from '../grounding/pack.js';
 import { loadCatalog, resolveLib, readDoc, driftFor, resolveVersion, localPackageDocs, localApiSurface } from '../engine/lib.js';
 import { selectForBudget, symbolsFromApi } from '../engine/select.js';
@@ -41,6 +52,14 @@ export interface ToolContext {
   dedup?: boolean;
   /** Per-session set of node ids already returned in full (drives `--dedup`). */
   seen?: Set<string>;
+  /** Path the served graph was loaded from (locates its tags sidecar). */
+  graphPath?: string;
+  /**
+   * The local runtime's semantic index, when one is reachable. Held for the
+   * life of the server: attaching once and sending only the question per call
+   * is what removes this process's own model load and vector scan.
+   */
+  semanticSession?: DaemonSemanticSession;
 }
 
 export interface VgTool {
@@ -111,6 +130,33 @@ function readyEmbedder(local?: boolean): Promise<Embedder | null> {
  */
 async function retrieve(graph: VgGraph, question: string, budget: number, ctx: ToolContext) {
   let mode = 'lexical';
+  // The relevance module ranks the seeds when installed; null → mechanical
+  // fallback. rankQuestion never throws and the provider is memoized, so
+  // this adds no meaningful latency to the navigation path.
+  const topicTags = await loadTopicTags(graph, ctx.root, ctx.graphPath);
+  const modRank = await rankQuestion(graph, rankingAskFrom(question), { limit: 48, topicTags });
+  // The daemon first: it already holds vectors for this slot, so it answers the
+  // semantic half without this process loading the model at all. `null` means
+  // "rank it yourself" — the same path taken when no daemon is running.
+  if (ctx.semanticSession && !ctx.local) {
+    try {
+      const ranked = await withTimeout(
+        ctx.semanticSession.rank(question, graph.provenance?.corpusHash),
+        SEMANTIC_BUDGET_MS,
+        'daemon ranking over budget',
+      );
+      if (ranked) {
+        const q = await queryGraphSemantic(graph, question, {
+          budget,
+          semanticRanked: ranked.ranked,
+          ranked: modRank,
+        });
+        return { q, mode: `semantic (vgd${ranked.model ? `, ${ranked.model}` : ''})` };
+      }
+    } catch {
+      // Over budget or the socket died — fall through to the local path.
+    }
+  }
   try {
     const q = await withTimeout(
       (async () => {
@@ -120,7 +166,7 @@ async function retrieve(graph: VgGraph, question: string, budget: number, ctx: T
         // cancel it, so the work continues in the background and caches to disk —
         // this call answers lexically, the next hits the warm cache and is fast.
         const nodeVectors = await getNodeEmbeddings(graph, embedder, ctx.root);
-        const r = await queryGraphSemantic(graph, question, { budget, embedder, nodeVectors });
+        const r = await queryGraphSemantic(graph, question, { budget, embedder, nodeVectors, ranked: modRank });
         mode = `semantic (${embedder.id})`;
         return r;
       })(),
@@ -131,7 +177,7 @@ async function retrieve(graph: VgGraph, question: string, budget: number, ctx: T
   } catch {
     // Over the latency budget or a semantic fault — answer from the lexical floor.
   }
-  return { q: queryGraph(graph, question, { budget }), mode: 'lexical' };
+  return { q: queryGraph(graph, question, { budget, ranked: modRank }), mode: 'lexical' };
 }
 
 /**
@@ -251,7 +297,7 @@ export const TOOLS: VgTool[] = [
   {
     name: 'search_symbols',
     description:
-      'Find a known name or literal string fast: ranked symbol lookup, plus a complete literal file-search for any quoted/multi-word phrase (config keys, log lines, UI copy). A phrase query reports totalTextMatches so you know you have every occurrence — use it instead of grep. Use first for most discovery; use query_graph for meaning.',
+      'Find a known name or literal string fast: ranked symbol lookup, plus a complete literal file-search for any quoted, multi-word, or path-like query (config keys, routes, log lines, UI copy). Quote a single name ("AddJwtBearer") to sweep every occurrence of it as text. A sweep reports totalTextMatches so you know you have every occurrence — use it instead of grep. Use first for most discovery; use query_graph for meaning.',
     inputSchema: obj(
       {
         query: { type: 'string', maxLength: 120, description: 'a symbol name, or a literal phrase to sweep for every occurrence of' },
@@ -379,7 +425,7 @@ export const TOOLS: VgTool[] = [
       if (!ra.node) return { endpoint: 'a', ...unresolved(ra.candidates) };
       if (!rb.node) return { endpoint: 'b', ...unresolved(rb.candidates) };
       const result = shortestPath(graph, ra.node.id, rb.node.id);
-      if (!result) return { connected: false };
+      if (!result) return pathDisconnect(graph, ra.node.id, rb.node.id);
       const byId = new Map(graph.nodes.map((n) => [n.id, n] as const));
       return { connected: true, direction: result.direction, path: result.ids.map((id) => byId.get(id)?.qualifiedName ?? id) };
     },
@@ -453,6 +499,99 @@ export const TOOLS: VgTool[] = [
     },
   },
   {
+    name: 'cross_impact_of',
+    description:
+      'Blast radius ACROSS the federated workspace: impact in this repo plus which member repos consume it over confidence-scored bridges (workspace/package links). Every cross-repo hop carries confidence, evidence, and the member graph identity.',
+    inputSchema: obj(
+      {
+        name: { type: 'string' },
+        pick: { type: 'number', description: 'nth candidate if ambiguous' },
+        max_members: { type: 'number', description: 'member repos to inspect (default 4)' },
+      },
+      ['name'],
+    ),
+    handler: (graph, args, ctx) => {
+      const { node, candidates } = resolveOne(graph, String(args.name ?? ''), numOrU(args.pick));
+      if (!node) return unresolved(candidates);
+      const home = impactOf(graph, node.id, { depth: 4 });
+      const homeSummary = `${home.direct} direct dependent${home.direct === 1 ? '' : 's'}, ${home.transitive} transitive in this repo`;
+
+      let federation: ReturnType<typeof loadOrDiscoverFederation> | null = null;
+      try {
+        federation = loadOrDiscoverFederation(ctx.root);
+      } catch {
+        federation = null;
+      }
+      if (!federation || federation.members.length <= 1) {
+        return {
+          root: node.name,
+          home: homeSummary,
+          federation: 'single-repo workspace — no member repos declared (.vibgrate/federation.json) or discovered',
+          summary: `${node.name}: ${homeSummary}; no federated members to check.`,
+        };
+      }
+
+      const homeId = repositoryIdFromRoot(ctx.root);
+      // Consumers of THIS repo: bridges whose dependency target is home —
+      // changing a symbol here can break the bridge's `from` member. Only
+      // high-confidence bridges qualify (the capsule rule, applied to MCP).
+      const bridges = highConfidenceBridges(federation.bridges ?? []).filter((b) => b.toRepositoryId === homeId);
+      const maxMembers = Math.max(1, Math.min(8, numOr(args.max_members, 4)));
+      const byConsumer = new Map<string, typeof bridges>();
+      for (const b of bridges) {
+        const list = byConsumer.get(b.fromRepositoryId) ?? [];
+        list.push(b);
+        byConsumer.set(b.fromRepositoryId, list);
+      }
+
+      const members = federation.members.filter((m) => byConsumer.has(m.repositoryId)).slice(0, maxMembers);
+      const crossRepo = members.map((m) => {
+        const via = byConsumer.get(m.repositoryId)!.map((b) => ({
+          kind: b.kind,
+          confidence: b.confidence,
+          evidence: b.evidence,
+          ...(b.packageName ? { package: b.packageName } : {}),
+        }));
+        // Prefer the member's registered graph artifact; fall back to the
+        // legacy in-repo layout. A member without a built map is still
+        // reported — with the bridge evidence and how to get the answer.
+        const graphFile = [m.graphPath, path.join(m.root, '.vibgrate', 'graph.json')].find((p) => p && fs.existsSync(p));
+        if (!graphFile) {
+          return { member: m.label, root: m.root, via, graph: null, note: `no code map built — run \`vg\` in ${m.root}` };
+        }
+        try {
+          const mg = parseGraph(fs.readFileSync(graphFile, 'utf8'));
+          const matches = mg.nodes
+            .filter((n) => n.name === node.name && n.kind !== 'file')
+            .sort((a, b) => b.importance - a.importance || (a.qualifiedName < b.qualifiedName ? -1 : 1))
+            .slice(0, 10)
+            .map((n) => ({ qualifiedName: n.qualifiedName, file: n.file, line: n.span.start }));
+          return {
+            member: m.label,
+            root: m.root,
+            via,
+            // Reproducibility: WHICH map answered, exactly.
+            graph: { corpusHash: mg.provenance.corpusHash },
+            matches,
+          };
+        } catch {
+          return { member: m.label, root: m.root, via, graph: null, note: 'member map unreadable — rebuild with `vg`' };
+        }
+      });
+
+      const matchTotal = crossRepo.reduce((n, c) => n + ('matches' in c ? (c.matches?.length ?? 0) : 0), 0);
+      return {
+        root: node.name,
+        home: homeSummary,
+        federation: { members: federation.members.length, consumingMembers: crossRepo.length, bridgesConsidered: bridges.length },
+        crossRepo,
+        summary:
+          `${node.name}: ${homeSummary}; ${crossRepo.length} member repo(s) consume this repo over high-confidence bridges` +
+          ` (${matchTotal} same-name symbol match${matchTotal === 1 ? '' : 'es'} across members).`,
+      };
+    },
+  },
+  {
     name: 'tests_for',
     description: 'Which tests cover this symbol — is a change here tested?',
     inputSchema: obj(
@@ -498,32 +637,72 @@ export const TOOLS: VgTool[] = [
   },
   {
     name: 'list_hubs',
-    description: 'Most-depended-on symbols.',
+    description: 'Most-depended-on symbols (includes precomputed blast-radius counts when available).',
     inputSchema: obj({ limit: { type: 'number' } }),
-    handler: (graph, args) =>
-      graph.nodes
+    handler: (graph, args) => {
+      const limit = numOr(args.limit, 20);
+      if (graph.summaries?.hubs?.length) {
+        return graph.summaries.hubs.slice(0, limit).map((h) => ({
+          name: h.name,
+          kind: h.kind,
+          file: h.file,
+          importance: h.importance,
+          isHub: true,
+          directDependents: h.direct,
+          depth2Dependents: h.depth2,
+          filesAffected: h.files,
+          tested: h.tested,
+        }));
+      }
+      return graph.nodes
         .filter((n) => n.kind !== 'file' && n.kind !== 'external')
         .sort((a, b) => b.importance - a.importance)
-        .slice(0, numOr(args.limit, 20))
-        .map((n) => ({ name: n.qualifiedName, kind: n.kind, file: n.file, line: n.span.start, importance: n.importance, isHub: n.isHub })),
+        .slice(0, limit)
+        .map((n) => ({
+          name: n.qualifiedName,
+          kind: n.kind,
+          file: n.file,
+          line: n.span.start,
+          importance: n.importance,
+          isHub: n.isHub,
+        }));
+    },
   },
   {
     name: 'get_facts',
-    description: 'Deterministic facts for a node (contract/invariant); needs a --deep build.',
-    inputSchema: obj({ name: { type: 'string' } }, ['name']),
+    description: 'Deterministic facts for a node (contract / invariant / characterization).',
+    inputSchema: obj(
+      {
+        name: { type: 'string' },
+        pick: { type: 'number', description: 'nth candidate if ambiguous' },
+      },
+      ['name'],
+    ),
     handler: (graph, args) => {
-      const { node, candidates } = resolveOne(graph, String(args.name ?? ''));
+      const { node, candidates } = resolveOne(graph, String(args.name ?? ''), numOrU(args.pick));
       if (!node) return unresolved(candidates);
-      if (!graph.facts) return { node: node.qualifiedName, facts: [], note: 'facts require a --deep build' };
+      if (!graph.facts) {
+        return {
+          node: node.qualifiedName,
+          facts: [],
+          note: 'map has no facts — rebuild with a current vg (facts ship on every build)',
+        };
+      }
       return { node: node.qualifiedName, facts: graph.facts.filter((f) => f.subjectIds.includes(node.id)) };
     },
   },
   {
     name: 'guide_node',
     description: 'Cited standards/practices for a node (OWASP/CWE).',
-    inputSchema: obj({ name: { type: 'string' } }, ['name']),
+    inputSchema: obj(
+      {
+        name: { type: 'string' },
+        pick: { type: 'number', description: 'nth candidate if ambiguous' },
+      },
+      ['name'],
+    ),
     handler: (graph, args) => {
-      const { node, candidates } = resolveOne(graph, String(args.name ?? ''));
+      const { node, candidates } = resolveOne(graph, String(args.name ?? ''), numOrU(args.pick));
       if (!node) return unresolved(candidates);
       const entries = new Map(FREE_PACK.entries.map((e) => [e.id, e]));
       return {
@@ -643,11 +822,16 @@ export const TOOLS: VgTool[] = [
   },
   {
     name: 'resolve_library',
-    description: 'Resolve a library to its canonical id and the version YOUR project uses (drift-annotated).',
+    description:
+      'Resolve a library to its canonical id and the version YOUR project uses (drift-annotated). ' +
+      'Call once per library and reuse the returned targetId for every library_docs follow-up — never guess an id.',
     // Canonical §4: `query` (+ optional `context_project`). `name` kept as a back-compat alias.
     inputSchema: obj(
       {
-        query: { type: 'string', description: 'library name or query' },
+        query: {
+          type: 'string',
+          description: 'the package name as written in the dependency file. Good: "react-hook-form". Bad: "forms"',
+        },
         name: { type: 'string' },
         context_project: { type: 'string' },
       },
@@ -690,17 +874,27 @@ export const TOOLS: VgTool[] = [
   },
   {
     name: 'library_docs',
-    description: 'Version-correct usage docs for a library, sliced to a token budget.',
+    description:
+      'Version-correct usage docs for a library, sliced to a token budget — official content matched to ' +
+      'the version this project has installed, not web-search results. Ask a focused question via query; ' +
+      'one call usually answers. After 2 calls without the section you need, stop and read the package ' +
+      'source under node_modules instead of searching again.',
     // Canonical §4: `targetId`/`query`, `verbosity`, `max_tokens`. `name`/`tokens` kept as aliases.
     inputSchema: obj(
       {
-        targetId: { type: 'string', description: 'id from resolve_library' },
-        query: { type: 'string', description: 'library name or query' },
+        targetId: { type: 'string', description: 'id from resolve_library (preferred over query)' },
+        query: {
+          type: 'string',
+          description:
+            'the library plus the specific need. Good: "zod refine custom error message". Bad: "zod" or "docs"',
+        },
         name: { type: 'string' },
         context_project: { type: 'string' },
         verbosity: { type: 'string', enum: ['concise', 'balanced', 'exhaustive'] },
-        max_tokens: { type: 'number', description: 'token budget' },
-        tokens: { type: 'number' },
+        // Tolerant on purpose: models often send budgets as strings — the
+        // handler coerces, so don't fail validation over "4000" vs 4000.
+        max_tokens: { type: ['number', 'string'], description: 'token budget (a numeric string is accepted)' },
+        tokens: { type: ['number', 'string'] },
         enterprise_strict: { type: 'boolean' },
         follow_up: { type: 'boolean' },
       },
@@ -720,17 +914,30 @@ export const TOOLS: VgTool[] = [
           : 'balanced';
       const budget = numOrU(args.max_tokens) ?? numOrU(args.tokens) ?? VERBOSITY_BUDGET[verbosity];
       const ver = resolveVersion(ctx.root, id);
-      const render = (readme: string, libName: string) => {
-        const apiSurface = localApiSurface(ctx.root, libName);
-        const sel = selectForBudget({ readme, query, apiSurface, budget });
-        // Quality gate (D18): assess the FULL local extraction (README + API surface), not the
-        // budget-trimmed slice — this decides whether the local doc can answer at all. When it
-        // can't (no example / stub / query keywords absent), the hosted-catalog escalation
-        // below answers instead (unless the server runs air-gapped with --local).
-        const quality = assessDocQuality([readme, apiSurface].filter(Boolean).join('\n\n'), {
+      // Focused question for quality/API slicing: strip a leading package id so
+      // "hono createMiddleware" still looks for createMiddleware in types.
+      const focusQuery = (() => {
+        const q = query.trim();
+        if (!q) return q;
+        const bare = id.replace(/^@[^/]+\//, '').toLowerCase();
+        const parts = q.split(/\s+/);
+        if (parts.length > 1 && parts[0].toLowerCase().replace(/^@[^/]+\//, '') === bare) {
+          return parts.slice(1).join(' ');
+        }
+        return q;
+      })();
+      const render = (readme: string, libName: string, readmeOnly?: boolean) => {
+        // Query-aware .d.ts surface so focused API questions pull matching signatures.
+        const apiSurface = localApiSurface(ctx.root, libName, focusQuery || undefined);
+        const sel = selectForBudget({ readme, query: focusQuery || query, apiSurface, budget });
+        // Quality gate (D18): assess what we actually serve (selected slice) so
+        // agents are not told "sufficient" for a truncated README that never
+        // answered the question. Escalation still uses this verdict.
+        const quality = assessDocQuality(sel.text, {
           name: libName,
-          query,
+          query: focusQuery || query || undefined,
           symbols: symbolsFromApi(apiSurface),
+          readmeOnly: readmeOnly === true && !apiSurface,
         });
         return {
           content: sel.text,
@@ -749,7 +956,7 @@ export const TOOLS: VgTool[] = [
       let answer: Record<string, unknown> | null = null;
       let sufficient = false;
       if (entry) {
-        const r = render(readDoc(ctx.root, entry), entry.name);
+        const r = render(readDoc(ctx.root, entry), entry.name, false);
         sufficient = r.metadata.quality.sufficient;
         answer = {
           targetId: entry.id,
@@ -763,9 +970,9 @@ export const TOOLS: VgTool[] = [
           metadata: r.metadata,
         };
       } else {
-        const local = localPackageDocs(ctx.root, id);
+        const local = localPackageDocs(ctx.root, id, { query: focusQuery || query || undefined });
         if (local) {
-          const r = render(local.docs, id);
+          const r = render(local.docs, id, local.readmeOnly);
           sufficient = r.metadata.quality.sufficient;
           answer = {
             targetId: id,
@@ -812,6 +1019,22 @@ export const TOOLS: VgTool[] = [
       return answer ?? { error: 'not_found' };
     },
   },
+  {
+    name: 'assess_change',
+    description:
+      'Before you write: would this code fit? One call reports whether the proposal conflicts with what its peers do, would add an unguarded route, or re-implements something that already exists — with the files to follow instead. Ask this while deciding; `vg review` asks the same questions after the fact, when the fix costs more.',
+    inputSchema: obj(
+      {
+        file: { type: 'string', description: 'repo-relative path the code would live at' },
+        content: { type: 'string', maxLength: 20000, description: 'the proposed code' },
+      },
+      ['file', 'content'],
+    ),
+    // A thin adapter. Every rule lives in `review/assess.ts`, transport-free, so
+    // the hook, the CLI and this tool cannot drift into three sets of answers.
+    handler: (graph, args, ctx) =>
+      assessProposedChange(graph, ctx.root, String(args.file ?? ''), String(args.content ?? '')),
+  },
 ];
 
 /** Default token budgets by verbosity (canonical §4) when no explicit `max_tokens` is given. */
@@ -824,18 +1047,28 @@ function conciseSummary(graph: VgGraph) {
 
 /** Shared map overview used by both `get_graph_summary` and `orient`. */
 function summarize(graph: VgGraph, top = 10) {
+  const topHubs = graph.summaries?.hubs?.length
+    ? graph.summaries.hubs.slice(0, top).map((h) => ({
+        name: h.name,
+        file: h.file,
+        importance: h.importance,
+        directDependents: h.direct,
+        depth2Dependents: h.depth2,
+      }))
+    : graph.nodes
+        .filter((n) => n.isHub)
+        .sort((a, b) => b.importance - a.importance)
+        .slice(0, top)
+        .map((n) => ({ name: n.qualifiedName, file: n.file, importance: n.importance }));
   return {
     counts: graph.meta.counts,
     languages: graph.meta.languages,
     cluster: graph.meta.cluster,
+    analysisTier: graph.meta.analysisTier ?? 'full',
     resolver: graph.provenance.resolver,
     generatedAt: graph.generatedAt,
     topAreas: [...graph.areas].sort((a, b) => b.size - a.size).slice(0, top).map((a) => ({ id: a.id, label: a.label, size: a.size })),
-    topHubs: graph.nodes
-      .filter((n) => n.isHub)
-      .sort((a, b) => b.importance - a.importance)
-      .slice(0, top)
-      .map((n) => ({ name: n.qualifiedName, file: n.file, importance: n.importance })),
+    topHubs,
   };
 }
 
@@ -895,12 +1128,58 @@ export function deferredToolNames(): string[] {
 }
 
 /**
+ * Server-side listing surface (the complement of the client-side deferral
+ * below, for hosts that cannot defer): `--surface hot` / `VG_MCP_SURFACE=hot`
+ * lists only the hot core, and `--tools a,b` / `VG_MCP_TOOLS=a,b` lists an
+ * explicit subset. LISTING ONLY — every tool in `TOOLS` stays callable
+ * whatever is listed (dispatch always resolves against the full array), so
+ * behaviour, ranking, and responses are byte-identical across surfaces; the
+ * only thing that changes is which schemas the host bills per step. Unknown
+ * names are dropped; an empty resolved set falls back to the full surface
+ * (fail-open — a typo must never produce a toolless server).
+ */
+export interface ToolSurface {
+  /** 'hot' lists only HOT_TOOLS; 'full' (default) lists everything. */
+  surface?: 'hot' | 'full';
+  /** Explicit tool names to list (wins over `surface`). */
+  tools?: string[];
+}
+
+export function listedToolNames(opts: ToolSurface = {}): string[] {
+  const all = TOOLS.map((t) => t.name);
+  if (opts.tools?.length) {
+    const known = new Set(all);
+    const picked = [...new Set(opts.tools.map((t) => t.trim()).filter((t) => known.has(t)))];
+    if (picked.length) return all.filter((n) => picked.includes(n));
+  }
+  if (opts.surface === 'hot') return all.filter((n) => (HOT_TOOLS as readonly string[]).includes(n));
+  return all;
+}
+
+/**
+ * Suggested per-task graph-call budget, injected into `orient`'s listed
+ * description so the agent sees the stop-discipline where it decides —
+ * alongside the schema, not buried in server instructions. Deterministic in
+ * the file count.
+ */
+export function graphCallBudget(fileCount: number): number {
+  if (fileCount < 150) return 3;
+  if (fileCount < 1000) return 4;
+  return 5;
+}
+
+export function budgetSuffix(fileCount: number): string {
+  return ` Repo size: ~${fileCount} file(s) indexed — aim for at most ${graphCallBudget(fileCount)} graph calls for this task.`;
+}
+
+/**
  * The Anthropic `mcp_toolset` deferral block for embedding `vg serve` in an
  * agent built on the Claude API: the hot core stays loaded, the rest defer and
  * are found via tool-search. Real, measured lever on hosts that support
- * `defer_loading` (~350–450 schema tokens/step vs 1,881 for the full set);
+ * `defer_loading` (~350–450 schema tokens/step vs ~1.9k for the full 20-tool set);
  * hosts that don't support it simply serve the whole optimized set. The server
- * is unchanged either way — one tool set, no modes.
+ * tool SET is one either way — the listing surface above changes what is
+ * advertised, never what is callable.
  */
 export function navigationToolsetConfig(serverName = 'vibgrate'): Record<string, unknown> {
   return {

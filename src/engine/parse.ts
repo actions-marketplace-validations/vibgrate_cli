@@ -2,9 +2,11 @@ import { Query, type Node, type Language } from 'web-tree-sitter';
 import { parserFor, loadLanguage } from './grammars.js';
 import { langById } from './languages.js';
 import { queriesFor, type DefRule } from './queries.js';
+import { extractEmbeddedScript } from './sfc.js';
 import { hashString } from './hash.js';
 import { redactSecrets } from '../core-open/utils/redact.js';
-import type { FileParse, RawCall, RawDef, RawGuard, RawHeritage, RawImport } from './types.js';
+import { extractAstRolesFromTree } from './ast-roles.js';
+import type { FileParse, RawCall, RawDef, RawGuard, RawHeritage, RawImport, RawTypeRef } from './types.js';
 
 /**
  * Parse a single file's source into the raw symbol/edge tables. Pure and
@@ -57,6 +59,7 @@ const MEMBER_PARENT_TYPES = new Set([
   'unconditional_assignable_selector', // dart: x.foo()
   'conditional_assignable_selector', // dart: x?.foo()
   'cascade_selector', // dart: x..foo()
+  'value_identifier_path', // rescript: Mod.foo() (only exists for qualified calls)
 ]);
 
 /**
@@ -79,6 +82,15 @@ function isQualifiedCallee(node: Node): boolean {
   // Lua wraps every callee in `variable`; qualified iff a `table` receiver exists
   // (`repo.fetch()` / `repo:method()` carry table:, bare `foo()` has only name:).
   if (parent.type === 'variable') return parent.childForFieldName('table') != null;
+  // OCaml wraps every callee in `value_path`; qualified iff a module path is
+  // present (`Mod.f x` has two named children, bare `f x` has one).
+  if (parent.type === 'value_path') return parent.namedChildCount > 1;
+  // ObjC message sends: `[obj doThing]` points elsewhere, but `[self …]` /
+  // `[super …]` stay within the class — same-file evidence still counts there.
+  if (parent.type === 'message_expression') {
+    const recv = parent.childForFieldName('receiver');
+    return recv != null && recv.text !== 'self' && recv.text !== 'super';
+  }
   return false;
 }
 
@@ -189,8 +201,21 @@ export async function parseSource(
   langId: string,
   source: string,
 ): Promise<FileParse> {
-  const def = langById(langId);
-  const langQueries = queriesFor(langId);
+  // Pure extractors (no tree-sitter) — SQL DDL topology.
+  if (langId === 'sql') {
+    const { parseSqlFile } = await import('./sql-extract.js');
+    return parseSqlFile(rel, source);
+  }
+
+  // Container formats (Vue/Svelte/Astro SFCs): parse the embedded script
+  // region with the JS/TS grammar over a position-preserving mask, so every
+  // offset/line below refers to the original file. The node keeps the
+  // container's own lang id.
+  const embedded = extractEmbeddedScript(langId, source);
+  const effLangId = embedded?.langId ?? langId;
+  const text = embedded?.masked ?? source;
+  const def = langById(effLangId);
+  const langQueries = queriesFor(effLangId);
   const hash = hashString(source);
   const result: FileParse = {
     rel,
@@ -201,20 +226,21 @@ export async function parseSource(
     calls: [],
     imports: [],
     heritage: [],
+    typeRefs: [],
     guards: [],
   };
   if (!def || !langQueries) return result;
 
-  const language = await loadLanguage(langId);
+  const language = await loadLanguage(effLangId);
   const parser = await parserFor(def);
-  const tree = parser.parse(source);
+  const tree = parser.parse(text);
   if (!tree) return result;
   const root = tree.rootNode;
 
   // --- definitions ---
   const rawDefs: (RawDef & { _start: number; _end: number })[] = [];
   for (const rule of langQueries.defs) {
-    collectDefs(language, langId, source, root, rule, rawDefs);
+    collectDefs(language, effLangId, text, root, rule, rawDefs);
   }
   // Dedupe definitions that overlap on the same name+range (multiple rules can
   // match the same node, e.g. abstract vs plain class).
@@ -251,7 +277,7 @@ export async function parseSource(
   // node, which would fabricate a recursion edge for every definition.
   const defNameBytes = new Set<number>();
   for (const qsrc of langQueries.defs) {
-    const q = compile(language, langId, qsrc.query);
+    const q = compile(language, effLangId, qsrc.query);
     if (!q) continue;
     for (const m of q.matches(root)) {
       const nameNode = namedCapture(m.captures, 'name');
@@ -260,7 +286,7 @@ export async function parseSource(
   }
   const calls: RawCall[] = [];
   for (const qsrc of langQueries.calls) {
-    const q = compile(language, langId, qsrc);
+    const q = compile(language, effLangId, qsrc);
     if (!q) continue;
     for (const cap of q.captures(root)) {
       if (cap.name !== 'callee') continue;
@@ -278,7 +304,7 @@ export async function parseSource(
   // --- imports ---
   const imports: RawImport[] = [];
   for (const qsrc of langQueries.imports) {
-    const q = compile(language, langId, qsrc);
+    const q = compile(language, effLangId, qsrc);
     if (!q) continue;
     for (const cap of q.captures(root)) {
       if (cap.name !== 'source') continue;
@@ -290,7 +316,7 @@ export async function parseSource(
   // --- heritage (extends / implements) ---
   const heritage: RawHeritage[] = [];
   for (const qsrc of langQueries.heritage) {
-    const q = compile(language, langId, qsrc);
+    const q = compile(language, effLangId, qsrc);
     if (!q) continue;
     for (const cap of q.captures(root)) {
       if (cap.name !== 'extends' && cap.name !== 'implements') continue;
@@ -302,10 +328,35 @@ export async function parseSource(
       a.byte - b.byte || a.kind.localeCompare(b.kind) || a.superName.localeCompare(b.superName),
   );
 
+  // --- type references (constructor-param / field types → DI dependency edges) ---
+  const typeRefs: RawTypeRef[] = [];
+  for (const qsrc of langQueries.typeRefs ?? []) {
+    const q = compile(language, effLangId, qsrc);
+    if (!q) continue;
+    for (const cap of q.captures(root)) {
+      if (cap.name !== 'typeref') continue;
+      typeRefs.push({ name: cap.node.text, byte: cap.node.startIndex });
+    }
+  }
+  result.typeRefs = typeRefs.sort((a, b) => a.byte - b.byte || a.name.localeCompare(b.name));
+
+  // --- namespaces declared by this file (C# cross-namespace resolution) ---
+  const namespaces = new Set<string>();
+  for (const qsrc of langQueries.namespaces ?? []) {
+    const q = compile(language, effLangId, qsrc);
+    if (!q) continue;
+    for (const cap of q.captures(root)) {
+      if (cap.name !== 'namespace') continue;
+      const name = cap.node.text.trim();
+      if (name) namespaces.add(name);
+    }
+  }
+  if (namespaces.size) result.namespaces = [...namespaces].sort();
+
   // --- guards (assert-like expressions → invariant facts) ---
   const guards: RawGuard[] = [];
   for (const qsrc of langQueries.guards ?? []) {
-    const q = compile(language, langId, qsrc);
+    const q = compile(language, effLangId, qsrc);
     if (!q) continue;
     for (const cap of q.captures(root)) {
       if (cap.name !== 'guard') continue;
@@ -314,6 +365,9 @@ export async function parseSource(
     }
   }
   result.guards = guards.sort((a, b) => a.line - b.line || a.expr.localeCompare(b.expr));
+
+  const roles = extractAstRolesFromTree(rel, effLangId, language, root, text);
+  if (roles) result.roles = roles;
 
   tree.delete();
   return result;

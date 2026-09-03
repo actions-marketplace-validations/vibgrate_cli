@@ -263,11 +263,18 @@ export function formatText(artifact: ScanArtifact, opts: FormatTextOptions = {})
 // first band. Keep these in sync with the pricing page and llms.txt.
 const PRICE_EDGES = [0, 25, 100, 300, 500];
 const PRICE_RATES = {
-  team: [6, 5, 4, 3.5],
-  business: [15, 12, 10, 8],
+  team: [4, 3.5, 2.75, 2.25],
+  business: [10, 8.5, 7, 5.5],
 };
 
-/** Monthly cost for `billableProjects` under a banded rate table. */
+// New customers get 25% off their first year — advertised here to nudge the
+// upgrade. Keep in sync with NEW_CUSTOMER_DISCOUNT in @vibgrate/core pricing.
+const NEW_CUSTOMER_DISCOUNT = 0.25;
+
+/**
+ * Monthly cost for `billableProjects` under a banded rate table, rounded **down**
+ * to a whole dollar — the money we quote is always whole dollars.
+ */
 function estimateMonthly(billableProjects: number, rates: number[]): number {
   let total = 0;
   for (let i = 0; i < 4; i++) {
@@ -277,13 +284,17 @@ function estimateMonthly(billableProjects: number, rates: number[]): number {
       total += (Math.min(billableProjects, hi) - lo) * rates[i];
     }
   }
-  // Round to whole cents to avoid binary-float noise (e.g. 0.1 * 3 = 0.30000004).
-  return Math.round(total * 100) / 100;
+  return Math.floor(total);
 }
 
-/** Whole dollars when integral, otherwise two decimal places. */
+/** First-year (intro) price for a new customer: retail less the discount, rounded down. */
+function firstYearPrice(retail: number): number {
+  return Math.floor(retail * (1 - NEW_CUSTOMER_DISCOUNT));
+}
+
+/** Whole-dollar money (headline prices are always integers after rounding down). */
 function formatMoney(value: number): string {
-  return value === Math.floor(value) ? `$${value}` : `$${value.toFixed(2)}`;
+  return `$${Math.floor(value)}`;
 }
 
 interface UpsellPanelOptions {
@@ -306,6 +317,8 @@ function renderUpsellPanel(billing: BillingSummary, opts: UpsellPanelOptions): s
   const raw = billing.billableProjectsRaw;
   const team = estimateMonthly(raw, PRICE_RATES.team);
   const business = estimateMonthly(raw, PRICE_RATES.business);
+  const teamFirstYear = firstYearPrice(team);
+  const businessFirstYear = firstYearPrice(business);
   const rawLabel = formatBillable(raw);
 
   const intro = opts.authenticated
@@ -351,9 +364,10 @@ function renderUpsellPanel(billing: BillingSummary, opts: UpsellPanelOptions): s
     ...intro,
     ``,
     chalk.bold(costLead),
-    `  ${chalk.bold('Team')}       ${chalk.bold.white(formatMoney(team))} / mo`,
-    `  ${chalk.bold('Business')}   ${chalk.bold.white(formatMoney(business))} / mo`,
+    `  ${chalk.bold('Team')}       ${chalk.bold.white(formatMoney(team))} / mo   ${chalk.dim('·')}  ${chalk.cyan(`${formatMoney(teamFirstYear)} / mo first year`)}`,
+    `  ${chalk.bold('Business')}   ${chalk.bold.white(formatMoney(business))} / mo   ${chalk.dim('·')}  ${chalk.cyan(`${formatMoney(businessFirstYear)} / mo first year`)}`,
     chalk.dim(`  (${rawLabel} billable project${raw === 1 ? '' : 's'}, banded per-project pricing)`),
+    chalk.cyan(`  New-customer offer: 25% off your first year.`),
     ``,
     chalk.bold(addsLead),
     ...adds,
@@ -575,6 +589,27 @@ function formatExtended(ext: ExtendedScanResults): string[] {
     }
     lines.push('');
   }
+  // ── Database Schema (compact) ──
+  if (ext.databaseSchema) {
+    const ds = ext.databaseSchema;
+    lines.push(chalk.bold.underline('  Database Schema'));
+    const dsHead: string[] = [];
+    if (ds.providers.length > 0) dsHead.push(ds.providers.join(', '));
+    dsHead.push(`${ds.models.length} model${ds.models.length !== 1 ? 's' : ''}`);
+    dsHead.push(`${ds.enums.length} enum${ds.enums.length !== 1 ? 's' : ''}`);
+    lines.push(`    ${dsHead.join(' · ')}`);
+    const bySource = new Map<string, number>();
+    for (const m of ds.models) bySource.set(m.source, (bySource.get(m.source) ?? 0) + 1);
+    if (bySource.size > 1) {
+      const sourceSummary = [...bySource.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([s, n]) => `${s}: ${n}`).join(', ');
+      lines.push(`    Sources: ${sourceSummary}`);
+    }
+    if (ds.models.length > 0) {
+      const preview = ds.models.slice(0, 5).map((m) => m.name).join(', ');
+      lines.push(`    Models: ${chalk.white(preview)}${ds.models.length > 5 ? chalk.dim(` (+${ds.models.length - 5} more)`) : ''}`);
+    }
+    lines.push('');
+  }
   // ── Dependency Graph (compact) ──
   if (ext.dependencyGraph) {
     const dg = ext.dependencyGraph;
@@ -608,12 +643,64 @@ function formatArchitectureDiagram(arch: ArchitectureResult): string[] {
   lines.push(...titleBox('Architecture Layers'));
   lines.push('');
   lines.push(chalk.bold('  Archetype: ') + `${arch.archetype}` + chalk.dim(` (${Math.round(arch.archetypeConfidence * 100)}% confidence)`));
+  if (arch.projectKind) {
+    lines.push(chalk.bold('  Project kind: ') + arch.projectKind + (arch.supportLevel !== undefined ? chalk.dim(` (support ${arch.supportLevel})`) : ''));
+  }
   lines.push(`  Files classified: ${arch.totalClassified}` + (arch.unclassified > 0 ? chalk.dim(` (${arch.unclassified} unclassified)`) : ''));
+  if (arch.folders && arch.folders.length > 0) {
+    lines.push(`  Folders classified: ${arch.folders.length}`);
+    for (const folder of arch.folders.slice(0, 12)) {
+      lines.push(`    ${folder.path}  ${folder.layer}  ${Math.round(folder.confidence * 100)}%  ${folder.fileCount} file${folder.fileCount !== 1 ? 's' : ''}`);
+    }
+    if (arch.folders.length > 12) {
+      lines.push(chalk.dim(`    + ${arch.folders.length - 12} more`));
+    }
+  }
+  if (arch.unclassifiedFiles && arch.unclassifiedFiles.length > 0) {
+    const extra = arch.unclassified > arch.unclassifiedFiles.length ? ` of ${arch.unclassified}` : '';
+    lines.push(`  Unclassified source (sample): ${arch.unclassifiedFiles.length}${extra}`);
+  }
+  if (arch.classified && arch.classified.length > 0) {
+    lines.push(`  Confirmed roles: ${arch.classified.length}`);
+    for (const file of arch.classified.slice(0, 8)) {
+      lines.push(`    ${file.filePath}  ${file.role}  ${file.layer}`);
+    }
+    if (arch.classified.length > 8) {
+      lines.push(chalk.dim(`    + ${arch.classified.length - 8} more`));
+    }
+  }
   lines.push('');
   if (arch.layers.length > 0) {
     for (const layer of arch.layers) {
+      if (layer.fileCount === 0) continue;
       const risk = layer.riskLevel === 'none' ? chalk.dim('none') : layer.riskLevel === 'low' ? chalk.green('low') : layer.riskLevel === 'moderate' ? chalk.yellow('moderate') : chalk.red('high');
       lines.push(`    ${chalk.bold(layer.layer)}  ${layer.fileCount} file${layer.fileCount !== 1 ? 's' : ''}  drift ${scoreBar(layer.driftScore)}  risk ${risk}`);
+    }
+    lines.push('');
+  }
+  if (arch.violations && arch.violations.length > 0) {
+    const extra = arch.violationsCapped ? '+' : '';
+    const boundary = arch.violations.filter((v) => !v.rule.startsWith('graph-conflict:'));
+    const conflicts = arch.violations.filter((v) => v.rule.startsWith('graph-conflict:'));
+    if (boundary.length > 0) {
+      const cap = extra && conflicts.length === 0 ? extra : '';
+      lines.push(`  Boundary violations (${boundary.length}${cap})`);
+      for (const v of boundary.slice(0, 8)) {
+        lines.push(`    ${v.fromFile} → ${v.toFile}  ${v.rule}`);
+      }
+      if (boundary.length > 8) {
+        lines.push(chalk.dim(`    + ${boundary.length - 8} more`));
+      }
+    }
+    if (conflicts.length > 0) {
+      const cap = extra ? extra : '';
+      lines.push(`  Layer conflicts (${conflicts.length}${cap})`);
+      for (const v of conflicts.slice(0, 8)) {
+        lines.push(`    ${v.fromFile} → ${v.toFile}  ${v.rule}`);
+      }
+      if (conflicts.length > 8) {
+        lines.push(chalk.dim(`    + ${conflicts.length - 8} more`));
+      }
     }
     lines.push('');
   }

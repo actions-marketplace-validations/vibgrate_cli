@@ -86,15 +86,22 @@ function writeArtifact(dependencies: unknown[]): void {
   fs.writeFileSync(path.join(dir, '.vibgrate', 'scan_result.json'), JSON.stringify(artifact));
 }
 
+const prevCredsEnv = process.env.VIBGRATE_CREDENTIALS;
+
 beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-fix-'));
   process.env.VIBGRATE_DSN = DSN;
+  // Isolate from any real login: resolveDsn falls back to the stored credential
+  // store, so point it at a file that never exists.
+  process.env.VIBGRATE_CREDENTIALS = path.join(dir, 'no-credentials.json');
   logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
   errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 });
 
 afterEach(() => {
   delete process.env.VIBGRATE_DSN;
+  if (prevCredsEnv === undefined) delete process.env.VIBGRATE_CREDENTIALS;
+  else process.env.VIBGRATE_CREDENTIALS = prevCredsEnv;
   logSpy.mockRestore();
   errSpy.mockRestore();
   vi.unstubAllGlobals();
@@ -150,6 +157,26 @@ describe('vg fix', () => {
     const errs = errSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('\n');
     expect(errs).toMatch(/paid capability/);
     exitSpy.mockRestore();
+  });
+
+  it('collapses duplicate plans onto the lowest-risk tier and remaps the recommendation', async () => {
+    writeArtifact([
+      { package: 'wrangler', section: 'devDependencies', currentSpec: '^4.111.0', resolvedVersion: '4.111.0', latestStable: '4.112.0', majorsBehind: 0, drift: 'minor-behind' },
+    ]);
+    const upgrades = [
+      { package: 'wrangler', ecosystem: 'npm', from: '4.111.0', to: '4.112.0', kind: 'minor', blastRadius: 'low', fixes: emptyDelta(), reason: 'minor update' } as PlannedUpgrade,
+    ];
+    const resp = mockResponse({ recommended: 'balanced' });
+    for (const plan of resp.plans) plan.upgrades = [...upgrades];
+    vi.stubGlobal('fetch', vi.fn(async () => fakeResponse(resp)));
+
+    await fixCommand.parseAsync([dir, '--format', 'json'], { from: 'user' });
+
+    const printed = JSON.parse(logSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('\n')) as FixPlanResponse;
+    // All three tiers carried the identical upgrade set → only the lowest-risk survives.
+    expect(printed.plans.map((p) => p.tier)).toEqual(['safe']);
+    // The server's recommendation pointed at a collapsed tier → remapped to the survivor.
+    expect(printed.recommended).toBe('safe');
   });
 
   it('exits 2 when --fail-on-vulns finds unresolved advisories in the recommended plan', async () => {

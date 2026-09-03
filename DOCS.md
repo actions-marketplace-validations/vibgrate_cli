@@ -14,32 +14,39 @@ For a quick overview, see the [README](./README.md). This document covers everyt
   - [vg baseline](#vg-baseline)
   - [vg bisect](#vg-bisect)
   - [vg drift](#vg-drift)
-  - [vg dsn create](#vg-dsn-create)
+  - [vg evidence](#vg-evidence)
   - [vg fix](#vg-fix)
   - [vg init](#vg-init)
-  - [vg login](#vg-login)
-  - [vg logout](#vg-logout)
-  - [vg push](#vg-push)
   - [vg report](#vg-report)
+  - [vg review](#vg-review)
   - [vg sbom](#vg-sbom)
   - [vg scan](#vg-scan)
     - [Vulnerabilities and exposure attribution](#vulnerabilities-and-exposure-attribution)
   - [vg update](#vg-update)
   - [vg why](#vg-why)
+- [Workspace auth & cloud upload](#workspace-auth--cloud-upload)
+  - [vg dsn create](#vg-dsn-create)
+  - [vg login](#vg-login)
+  - [vg logout](#vg-logout)
+  - [vg push](#vg-push)
 - [Code Graph Commands](#code-graph-commands)
   - [vg ask](#vg-ask)
-  - [vg benchmark](#vg-benchmark)
   - [vg build](#vg-build)
+  - [vg watch](#vg-watch)
   - [vg bundle](#vg-bundle)
+  - [vg code](#vg-code)
   - [vg embed](#vg-embed)
   - [vg export](#vg-export)
   - [vg facts](#vg-facts)
   - [vg guide](#vg-guide)
   - [vg impact](#vg-impact)
-  - [vg install](#vg-install)
+  - [vg install / vg uninstall](#vg-install)
   - [vg lib](#vg-lib)
+  - [vg locale](#vg-locale)
   - [vg map / vg hubs / vg areas / vg oddities](#vg-map--vg-hubs--vg-areas--vg-oddities)
+  - [vg llm-host](#vg-llm-host)
   - [vg models](#vg-models)
+  - [vg module](#vg-module)
   - [vg path](#vg-path)
   - [vg savings](#vg-savings)
   - [vg serve](#vg-serve)
@@ -49,6 +56,17 @@ For a quick overview, see the [README](./README.md). This document covers everyt
   - [vg tests](#vg-tests)
   - [vg tree](#vg-tree)
   - [vg unknowns](#vg-unknowns)
+- [Holistic Code Specification (vg hcs)](#holistic-code-specification-vg-hcs)
+  - [vg hcs extract](#vg-hcs-extract)
+  - [vg hcs digest](#vg-hcs-digest)
+  - [vg hcs map](#vg-hcs-map)
+  - [vg hcs gate](#vg-hcs-gate)
+  - [vg hcs validate](#vg-hcs-validate)
+- [Diagnostics, IDE & runtime](#diagnostics-ide--runtime)
+  - [vg daemon](#vg-daemon)
+  - [vg doctor](#vg-doctor)
+  - [vg lsp](#vg-lsp)
+  - [vg policy](#vg-policy)
 - [DriftScore](#driftscore)
 - [Drift Baselines & Fitness Functions](#drift-baselines--fitness-functions)
   - [How the Score Is Calculated](#how-the-score-is-calculated)
@@ -76,6 +94,7 @@ For a quick overview, see the [README](./README.md). This document covers everyt
   - [Security Posture](#security-posture)
   - [Security Scanners](#security-scanners)
   - [Service Dependencies](#service-dependencies)
+  - [Database Schema](#database-schema)
   - [Architecture Layers](#architecture-layers)
   - [Code Quality Metrics](#code-quality-metrics)
   - [OWASP Category Mapping](#owasp-category-mapping)
@@ -169,6 +188,10 @@ Expected results:
 
 ## Commands Reference
 
+Drift scoring, baselines, reports, supply-chain evidence, and related local tooling.
+
+**Typical path:** `vg init` → `vg scan` → `vg baseline` → `vg report` → `vg fix`
+
 ### vg baseline
 
 Create a drift baseline snapshot for delta comparison.
@@ -180,6 +203,7 @@ vg baseline [path]
 Runs a full scan and saves the result to `.vibgrate/baseline.json`. Use this as the starting point for tracking drift over time.
 
 ---
+
 
 ### vg bisect
 
@@ -203,6 +227,7 @@ Exit codes: `0` when the query resolves, `2` when `--assert` finds the constrain
 
 ---
 
+
 ### vg drift
 
 What is outdated across your dependencies — a fast, offline currency check.
@@ -222,25 +247,56 @@ Add `--json` for machine-readable output.
 
 ---
 
-### vg dsn create
 
-Generate an HMAC-signed DSN token for API authentication.
+### vg evidence
+
+Vibgrate Evidence — signed, reproducible regulatory evidence. Register products with digital elements, freeze a shipped release into an immutable component manifest, then answer "which shipped products contain this vulnerability, at which versions, in which markets, still in support?" as evidence a third party can verify offline.
+
+Reporting duties are modelled as **regimes** (jurisdiction-neutral): the EU Cyber Resilience Act (`--regime cra`) is the first; DORA incident reporting (`--regime dora-incident`) ships too. A new jurisdiction is a regime profile, not a new command.
 
 ```bash
-vg dsn create --workspace <id|new> [--region <region>] [--ingest <url>] [--write <path>]
+vg evidence init [--regime <id>] [--coordinator <csirt>] [--responsible <name>] [--filing-authority] [--ooo <contact>]
+vg evidence regimes
+vg evidence product add <name> [--markets DE,FR] [--classification <id>] [--in-scope] [--rationale <text>] [--bind <ref>] [--until <date>]
+vg evidence product list
+vg evidence product show <id>
+vg evidence release <product> <version> --from <sbom-or-scan> [--ship-date <date>] [--build-id <id>] [--digest <sha256>] [--markets DE,FR]
+vg evidence exposure <vuln> [--regime <id>] [--advisory <file>] [--offline] [--as-of <date>] [--products <substr>] [--include-eol] [--format table|json] [--pack --stage <stage>] [--bundle <dir>] [--tsa <url>]
+vg evidence readiness [--regime <id>] [--format table|json]
+vg evidence support-period <product> [--from <date>] [--until <date>]
+vg evidence pack <vuln> [--regime <id>] [--stage <stage>] [--advisory <file>] [--offline] [--out <file>]
+vg evidence drill [--regime <id>] [--scenario <name>] [--elapsed <seconds>]
+vg evidence watch [--regime <id>] [--since <date>] [--webhook <url>] [--format table|json]
+vg evidence verify <bundle> [--pub <file>]
+vg evidence push [--result <bundle-or-file>] [--regime <id>] [--dsn <dsn>] [--signed]
+vg evidence export [--out <dir>] [--regime <id>]
 ```
 
-| Flag          | Default    | Description                                                                 |
-| ------------- | ---------- | --------------------------------------------------------------------------- |
-| `--workspace` | _required_ | Your workspace ID, or `new` to auto-generate a workspace                    |
-| `--region`    | `us`       | Data residency region (`us`, `eu`)                                          |
-| `--ingest`    | —          | Custom ingest API URL (overrides `--region`)                                |
-| `--write`     | —          | Write DSN to a file (add to `.gitignore`!)                                  |
+| Command | Description |
+|---------|-------------|
+| `vg evidence init` | Set org, coordinator CSIRT, and the person with filing authority |
+| `vg evidence regimes` | List available reporting regimes and their clocks |
+| `vg evidence product add` | Register a product with digital elements (PDE) |
+| `vg evidence release` | Freeze a shipped release into an immutable component manifest |
+| `vg evidence exposure` | Which shipped products contain a vulnerability — with signed evidence |
+| `vg evidence readiness` | Deterministic gap report against the regime's obligations |
+| `vg evidence drill` | Timed dry-run of the determination against a simulated advisory |
+| `vg evidence pack` | Build the submission pack a human pastes into the reporting platform |
+| `vg evidence watch` | Check CISA KEV for new exposure against your shipped components |
+| `vg evidence verify` | Verify an evidence bundle offline — no account, no network |
+| `vg evidence push` | Push the product registry (and an optional exposure result) to Vibgrate Cloud |
+| `vg evidence export` | Air-gap bundle of all evidence state |
 
-When using `--workspace new`, the CLI auto-generates a workspace ID and provisions the DSN
-with the Vibgrate API. Rate limited to 1 new DSN per 5 minutes per IP address.
+`exposure` matches against manifests **frozen at ship time**, not the current tree, and never guesses: a bound product with no frozen manifest returns `undetermined` with a reason. It runs fully `--offline` against a local advisory file, and can emit a signed evidence bundle (`--bundle <dir>`) that `vg evidence verify` checks offline with honest `verified` / `unverified` / `failed` states. Pass `--tsa <url>` to anchor the bundle to a trusted **RFC 3161** timestamp (`timestamp.tsr`), fully verifiable with `openssl ts -verify`.
+
+`watch` joins the CISA **Known Exploited Vulnerabilities (KEV)** catalog to the components in your frozen manifests (via OSV) and reports any KEV-listed vulnerability that affects a shipped release — alerting via stdout or `--webhook`. It **surfaces the KEV listing**; whether a vulnerability is "actively exploited" for a filing is your determination, not the tool's.
+
+**Exit codes** (CI-usable): `0` no exposure · `2` exposure found · `3` undetermined (manual review) · `1` operational error.
+
+No language model touches any figure in the evidence path, and every determination carries an evidence-not-compliance disclaimer. Vibgrate Evidence produces evidence to support your obligations under a regime; it does not determine compliance and is not legal advice.
 
 ---
+
 
 ### vg fix
 
@@ -327,6 +383,7 @@ advisory at or above the threshold or an apply step fails.
 
 ---
 
+
 ### vg init
 
 Initialise Vibgrate in a project.
@@ -347,50 +404,6 @@ Creates:
 
 ---
 
-### vg login
-
-Authenticate the CLI with your Vibgrate workspace through the browser. Credentials are stored locally so `vg fix` and `vg push` can reach the hosted planner and Vibgrate Cloud.
-
-```bash
-vg login
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--region <region>` | `us` | Data-residency region (`us`, `eu`) |
-| `--ingest <url>` | — | Custom ingest API URL (overrides `--region`) |
-| `--no-browser` | — | Print the URL to open instead of launching a browser (headless / SSH) |
-
----
-
-### vg logout
-
-Clear stored Vibgrate login credentials from this machine.
-
-```bash
-vg logout
-```
-
----
-
-### vg push
-
-Upload scan results to the Vibgrate Cloud API.
-
-```bash
-vg push [--dsn <dsn>] [--file <file>] [--region <region>] [--strict]
-```
-
-| Flag       | Default                      | Description                                 |
-| ---------- | ---------------------------- | ------------------------------------------- |
-| `--dsn`    | `VIBGRATE_DSN` env           | DSN token for authentication                |
-| `--file`   | `.vibgrate/scan_result.json` | Scan artifact to upload                     |
-| `--region` | —                            | Override data residency region (`us`, `eu`) |
-| `--strict` | —                            | Fail hard on upload errors                  |
-
-Upload is always optional. Best-effort by default — use `--strict` in CI if you want the pipeline to fail on upload errors.
-
----
 
 ### vg report
 
@@ -406,6 +419,180 @@ vg report [--in <file>] [--format md|text|json]
 | `--format` | `text`                       | Output format: `md`, `text`, or `json` |
 
 ---
+
+
+### vg review
+
+**Vibgrate Review** — architecture and security-control review of the change you
+just made, run locally from the code map. Where `vg scan` answers "how far behind
+is the stack?", `vg review` answers a different question about the same
+repository: *did this change move the system toward its declared architecture,
+weaken a security control, or create an implication the author did not account
+for?*
+
+```bash
+vg review                            # the working tree + index, vs HEAD
+vg review --base origin/main         # merge-base of HEAD and the base branch
+vg review explain arch-01            # the evidence behind one finding
+```
+
+| Flag                  | Default | Description                                                                |
+| --------------------- | ------- | -------------------------------------------------------------------------- |
+| `--base <ref>`        | —       | Review HEAD against the merge-base with `<ref>`                             |
+| `--format <fmt>`      | `text`  | `text`, `json` (the receipt), `sarif` (security findings only), `md`        |
+| `-o, --out <file>`    | —       | Write the formatted result to a file                                        |
+| `--push`              | off     | Send the receipt to Vibgrate Cloud (needs a DSN)                            |
+| `--fail-on <level>`   | from config | Gate CI on this decision: `none`, `fail`, or `needs_review`              |
+| `--explain`           | off     | Add local-model explanations. **Requires a local model; fails closed (exit 6) without one** |
+| `--include-spans`     | off     | Include evidence line ranges in the pushed receipt                          |
+| `--include-snippets`  | off     | Include capped source snippets in the pushed receipt (explicit opt-in)      |
+| `--offline` (global)  | off     | Never touch the network — no push, no model fetch                          |
+| `--write-context`     | off     | Write `.vibgrate/review-context.md` — committed agent memory                |
+| `--inject-context [file]` | off | Update the managed review block inside `CLAUDE.md` (or a named file)      |
+
+`vg review` reads the code map, so run `vg` (or `vg build`) in the repository
+first. Without a map it exits `6` — never `0`.
+
+#### Decisions
+
+Policy owns the decision, and it is the only layer that writes one. Findings —
+from the scanners or from the optional local model — have nowhere to put a
+verdict.
+
+| Decision       | Meaning                                                                       |
+| -------------- | ----------------------------------------------------------------------------- |
+| `pass`         | No material delta, or every finding is target-aligned                          |
+| `fail`         | An unresolved **protected** finding, or a high-severity finding above the confidence threshold |
+| `needs_review` | Findings a human should look at                                                |
+| `undetermined` | Not enough evidence to decide — deliberately not a pass                        |
+
+**Gating is opt-in, exactly as it is for [`vg scan`](#vg-scan).** By default
+`vg review` reports the decision, writes it to the receipt, and exits `0` — even
+on `fail`. It breaks the build only when you ask it to:
+
+| Gate | Set by | Exits `2` on |
+| --- | --- | --- |
+| `none` | the default | never |
+| `fail` | `--fail-on fail`, or `enforcement = "enforced"` with `fail_on = "fail"` | `fail` |
+| `needs_review` | `--fail-on needs_review`, or the same in config | `fail`, `needs_review`, `undetermined` |
+
+A gate failure exits `2` (`GATE_FAILED`) — the same code `vg scan`, `vg drift`
+and `vg hcs gate` use. It is deliberately **not** `1`: across this CLI `1` means
+the command itself errored, and a policy verdict of `fail` is the command
+working correctly. Machines should branch on `decision` in the receipt, which is
+unambiguous; the exit code exists for CI.
+
+`enforcement = "advisory"` means no gate at all. That is what makes the setting
+real rather than a label on the receipt — an advisory repository reports
+honestly and never blocks a merge.
+
+**Protected findings** — an unguarded entrypoint, a removed guard, a validated
+taint flow, a known-vulnerable dependency — carry `protected_finding: true`.
+While one is unresolved, policy cannot emit `pass`: not via an approved
+exception, not via low confidence, not via the quick path, and not via anything
+the model says. Turn a rule off in `.vibgrate/review.toml` if it does not apply
+to your repository; that is the only way to stop it gating.
+
+#### What it looks for
+
+| Finding | What it means |
+|---|---|
+| `boundary_bypass` | A dependency breaks the declared layering, or skips a tier |
+| `peer_deviation` | This file does something its peers do differently |
+| `unguarded_entrypoint` | **Protected.** A mutating route has no authorization guard, where its peers do |
+| `guard_removed` | **Protected.** A guard was deleted and nothing equivalent remains |
+| `known_vulnerable_dependency` | **Protected.** A changed manifest declares a package with a known advisory |
+| `duplicate_implementation` | This re-implements something the repository already has |
+| `unverified_change` | Changed code with no test reaching it |
+
+Two of these deserve a note, because they are what a linter cannot do:
+
+**Peers are graph areas and roles, not folders.** A directory is a filing
+decision; an area is a structural one. Recent files count roughly twice what
+year-old ones do, so a large abandoned wing does not get to dictate "the
+convention". Where peers are too evenly split to have one, Review says *no
+convention* instead of naming a plurality winner.
+
+**A majority is never treated as correct.** Peers establish what is *normal*;
+only `target_pattern` establishes what is *right*. A file that goes through the
+service layer while all its peers bypass it is the first one to improve — Review
+will not flag it. That is the difference between this and a consistency scanner,
+which by construction scores your best file worst.
+
+**Routes get three answers, not two.** Every route is `auth`, `not-auth`, or
+`unsure`, and `unsure` is never promoted. A guard Review does not recognise, or
+a file it could not parse, becomes an honest unknown — never "this route is
+open". Below four classified peer routes a finding is advisory and cannot gate.
+
+#### Before you write it — `assess_change`
+
+`vg review` asks "was that change sound?". The MCP tool `assess_change` asks
+"would this be sound?", while an agent is still deciding — the only point at
+which the fix is free.
+
+```jsonc
+// one call, from any MCP client wired to `vg serve`
+{ "file": "src/routes/invoices.ts", "content": "<the proposed code>" }
+```
+
+It returns the conflicts, anything the proposal duplicates, the convention its
+peers follow with example files to open, and the declared target. One tool, not
+a family of them: a family pushes the judgement into the model, and in this
+product the model never decides.
+
+#### Agent memory — `--write-context`
+
+`vg review --write-context` writes `.vibgrate/review-context.md`: the declared
+target, the conventions with exemplars, what is currently open, and what to do.
+Commit it, and the next agent starts from the answer.
+
+It tells the agent to follow the **declared target**, never "the majority" —
+otherwise a repository mid-migration ends up with memory instructing every agent
+to perpetuate the legacy it is migrating away from. `--inject-context` keeps the
+same content in a marked block inside `CLAUDE.md`, leaving everything a human
+wrote in that file untouched.
+
+#### Configuration — `.vibgrate/review.toml`
+
+```toml
+[review]
+enforcement = "advisory"          # advisory | enforced
+fail_on = "fail"                  # fail | needs_review
+target_pattern = "layered"        # the architecture you say you want
+
+[review.protected]
+unguarded_entrypoint = true
+known_vulnerable_dependency = true
+validated_taint = true
+```
+
+Read from the **trusted base branch** when `--base` is given, so a pull request
+cannot weaken the policy applied to itself.
+
+Declaring `target_pattern` is what turns a layering observation into a
+*regression*. Without it, a dependency that skips a tier is reported as a medium
+finding about the repository's own majority — because a majority is not the same
+thing as a decision, and Review will not treat it as one.
+
+#### What it does not claim
+
+Review reports change integrity. It does not prove code is secure, correct, or
+free of vulnerabilities; it does not replace Semgrep, CodeQL, a compiler, or your
+tests; and **absence of findings is not a certification**.
+
+#### Privacy
+
+Source stays on the machine. `--push` sends the receipt — decisions, claims,
+evidence ids, paths, digests, versions — never the analysis capsule and never
+source text. Line ranges are opt-in (`--include-spans`); snippets are a second,
+explicit opt-in (`--include-snippets`) and are capped. `--offline`, or simply
+having no DSN, keeps the receipt on disk.
+
+Ready-to-use workflows: `examples/github-actions/vibgrate-review.yml` and
+`vibgrate-review-sarif.yml`.
+
+---
+
 
 ### vg sbom
 
@@ -428,6 +615,7 @@ Use this to treat SBOMs as operational intelligence instead of static compliance
 `vg sbom vex` is input-agnostic: it assembles a complete OpenVEX document from the statements you supply (`--from <file>` and/or repeatable `--statement`), so it works regardless of which scanner flagged the components. A zero-statement document is valid and honest — it asserts no known affected components.
 
 ---
+
 
 ### vg scan
 
@@ -458,6 +646,11 @@ vg scan [path] [--vulns] [--full] [--format text|json|sarif|md] [--out <file>] [
 | `--package-manifest <file>` | — | JSON or ZIP package-version manifest used for offline/latest lookups (latest bundle: `https://github.com/vibgrate/manifests/latest-packages.zip`) |
 | `--no-local-artifacts` | — | Do not write `.vibgrate/*.json` scan artifacts to disk |
 | `--max-privacy` | — | Hardened privacy mode with minimal scanners and no local artifacts |
+| `--no-graph` | — | Skip building the local code map that scan produces after scoring drift |
+| `--project-scan-timeout <seconds>` | `180` | Per-project scan timeout |
+| `--repository-name <name>` | directory / `package.json` name | Override the repository name recorded for this scan |
+| `--force` | — | Always create a fresh ingest, even when the repository is unchanged since the last scan |
+| `--quiet` | — | Suppress promotional output; scan results are unaffected |
 
 By default, the scan writes `.vibgrate/scan_result.json`. Use `--no-local-artifacts` or `--max-privacy` to suppress local JSON artifact files.
 
@@ -485,6 +678,8 @@ Expected results:
 - Exit code `2` when configured quality gates are exceeded.
 - When `--push` is enabled, artifact upload is attempted after scan completion.
 
+**Plan limits never block the scan.** If your workspace is at a plan limit that gates ingestion — repository cap, scan credits, VM minutes — the CLI warns with the reason (and the upgrade link), disables the upload, and runs the **full local scan** anyway, repeating the warning after the results so it isn't lost in the output. Local scoring never depended on the cloud, and now neither does it depend on your plan. Pass `--strict` to keep the old behaviour and fail the command instead, which is usually what you want in CI.
+
 ---
 
 ### Vulnerabilities and exposure attribution
@@ -510,6 +705,7 @@ vg scan --full
 
 ---
 
+
 ### vg update
 
 Check for and install updates.
@@ -518,12 +714,17 @@ Check for and install updates.
 vg update [--check] [--pm <manager>]
 ```
 
-| Flag      | Description                                            |
-| --------- | ------------------------------------------------------ |
-| `--check` | Only check for updates, don't install                  |
-| `--pm`    | Force a package manager (`npm`, `pnpm`, `yarn`, `bun`) |
+| Flag        | Description                                            |
+| ----------- | ------------------------------------------------------ |
+| `--check`   | Only check for updates, don't install                  |
+| `--pm`      | Force a package manager (`npm`, `pnpm`, `yarn`, `bun`) |
+| `--global`  | Update the global installation                         |
+| `-y, --yes` | Skip confirmation prompts                              |
+
+**On Windows**, updating a global install replaces files the running `vg` process has open — Windows locks loaded native modules (`.node`), so npm fails with `EBUSY: resource busy or locked`. `vg update` handles this: it stops the vgd daemon and any older `vg serve` first, and if the install still hits a locked file it offers to finish the update from a detached script that waits for `vg` to exit. Pass `-y` to accept that without a prompt. The script writes a transcript whose path is printed; check the result with `vg --version`.
 
 ---
+
 
 ### vg why
 
@@ -537,24 +738,87 @@ vg why <package>
 
 ---
 
-## Code Graph Commands
 
-Vibgrate includes a full code graph engine — call trees, impact surfaces, semantic search, and AI Context serving. All graph commands read from (or write to) a local graph artifact at `.vibgrate/graph.json`. Build the map once with `vg build`, then query it offline indefinitely.
+## Workspace auth & cloud upload
 
-**Global options available on every graph command:**
+Sign in to Vibgrate Cloud, manage DSN tokens for CI, and push scan results. Local drift scoring does not require this — nothing leaves your machine until you push.
 
-| Flag | Description |
-|------|-------------|
-| `--cwd <dir>` | Working directory (default: current) |
-| `--graph <file>` | Path to graph file (default: `.vibgrate/graph.json`) |
-| `--json` | Machine-readable JSON output |
-| `--quiet` | Suppress non-error output |
-| `--local` | Offline mode — no network calls or downloads |
-| `--client <name>` | Identify the AI client (e.g. `claude`) so navigation calls are counted in `vg savings` |
-| `--deep` | Enable deep derivation (for `vg facts`, `vg build`) |
-| `--no-cache` | Skip and clear cached data |
+**Typical path:** `vg login` → `vg dsn create` → `vg push` → `vg logout`
+
+### vg dsn create
+
+Generate an HMAC-signed DSN token for API authentication.
+
+```bash
+vg dsn create --workspace <id|new> [--region <region>] [--ingest <url>] [--write <path>]
+```
+
+| Flag          | Default    | Description                                                                 |
+| ------------- | ---------- | --------------------------------------------------------------------------- |
+| `--workspace` | _required_ | Your workspace ID, or `new` to auto-generate a workspace                    |
+| `--region`    | `us`       | Data residency region (`us`, `eu`)                                          |
+| `--ingest`    | —          | Custom ingest API URL (overrides `--region`)                                |
+| `--write`     | —          | Write DSN to a file (add to `.gitignore`!)                                  |
+
+When using `--workspace new`, the CLI auto-generates a workspace ID and provisions the DSN
+with the Vibgrate API. Rate limited to 1 new DSN per 5 minutes per IP address.
 
 ---
+
+
+### vg login
+
+Authenticate the CLI with your Vibgrate workspace through the browser. Credentials are stored locally so `vg fix` and `vg push` can reach the hosted planner and Vibgrate Cloud.
+
+```bash
+vg login
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--region <region>` | `us` | Data-residency region (`us`, `eu`) |
+| `--ingest <url>` | — | Custom ingest API URL (overrides `--region`) |
+| `--no-browser` | — | Print the URL to open instead of launching a browser (headless / SSH) |
+
+---
+
+
+### vg logout
+
+Clear stored Vibgrate login credentials from this machine.
+
+```bash
+vg logout
+```
+
+---
+
+
+### vg push
+
+Upload scan results to the Vibgrate Cloud API.
+
+```bash
+vg push [--dsn <dsn>] [--file <file>] [--region <region>] [--strict]
+```
+
+| Flag       | Default                      | Description                                 |
+| ---------- | ---------------------------- | ------------------------------------------- |
+| `--dsn`    | `VIBGRATE_DSN` env           | DSN token for authentication                |
+| `--file`   | `.vibgrate/scan_result.json` | Scan artifact to upload                     |
+| `--region` | —                            | Override data residency region (`us`, `eu`) |
+| `--strict` | —                            | Fail hard on upload errors                  |
+
+Upload is always optional. Best-effort by default — use `--strict` in CI if you want the pipeline to fail on upload errors.
+
+---
+
+
+## Code Graph Commands
+
+Build and query the deterministic code map.
+
+**Typical path:** `vg build` → `vg status` → `vg ask` → `vg impact` → `vg share`
 
 ### vg ask
 
@@ -564,9 +828,9 @@ Ask the code map a question using hybrid lexical + structural + semantic search.
 vg ask "<question>"
 ```
 
-A local ONNX embedding model is downloaded once on first use, then cached and fully offline. Degrades gracefully to lexical-only under `--local` or `--no-semantic`.
+A local ONNX embedding model is downloaded once on first use, then cached and fully offline. Degrades gracefully to lexical-only under `--offline` or `--no-semantic`.
 
-> **Semantic search is opt-in.** The embedding backend (`fastembed`, which pulls a native ONNX runtime) is declared as an **optional dependency**: package managers install it by default, but if it's absent — e.g. you installed with `--omit=optional`, or it failed to build on your platform — `vg ask` and `vg embed` transparently fall back to lexical + structural search. Nothing else in the CLI needs it, so `vg build`, `vg show`, `vg impact`, drift reporting, and MCP serving all run without it. If you never use semantic `ask`, you can install lean: `npm i @vibgrate/cli --omit=optional`.
+> **Semantic search is opt-in.** The embedding backend (`fastembed`, which pulls a native ONNX runtime) is declared as an **optional dependency**: package managers install it by default, but if it's absent — e.g. you installed with `--omit=optional`, or it failed to build on your platform — `vg ask` and `vg embed` transparently fall back to lexical + structural search. Nothing else in the CLI needs it, so `vg build`, `vg show`, `vg impact`, drift reporting, and MCP serving all run without it. If you never use semantic `ask`, you can install lean: `npm i @vibgrate/cli --omit=optional`. A host application that bundles the CLI without optional dependencies (Vibgrate for VS Code does this) can supply the backend from its own directory by setting `VIBGRATE_EMBEDDER_PATH` to a folder whose `node_modules` contains `fastembed`; when set, that copy is used first.
 
 Before answering, `ask` checks whether files changed since the map was last built and, if so, rebuilds it incrementally first (only the changed files re-parse) — so answers always reflect the code as it is now. The check is stat-based and costs almost nothing when nothing changed; `--no-refresh` opts out.
 
@@ -576,22 +840,6 @@ Before answering, `ask` checks whether files changed since the map was last buil
 | `-b, --budget <n>` | `2000` | Approx token budget for returned context |
 | `--no-semantic` | — | Lexical only; skip the local embedding pass |
 | `--no-refresh` | — | Answer from the map as built; skip the auto-rebuild when files changed |
-
----
-
-### vg benchmark
-
-A reproducible build + memory + token-reduction benchmark for this repository — honest, self-measured estimates you can re-run.
-
-```bash
-vg benchmark
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--budget <n>` | `2000` | Approx token budget used when estimating context savings |
-
-Add `--json` for machine-readable output.
 
 ---
 
@@ -620,7 +868,28 @@ Maps source code into a graph artifact, enabling all downstream queries (`vg sho
 | `--grammars <dir>` | — | Grammar `.wasm` directory for offline/air-gapped use |
 | `-o, --export <file>` | — | Also write the map to a file (format from extension) |
 
+**Local by default — no git churn.** The first time vg writes into `.vibgrate/` it also creates `.vibgrate/.gitignore`, keeping the graph artifacts (`graph.json`, `graph.html`, `GRAPH_REPORT.md`, `facts.jsonl`, `mcp-navigation.json`) and the cache out of git — so builds, auto-refreshes, and MCP use never leave your branch dirty. Run `vg share` when you want the map committed for your team (it rewrites that ignore file). vg never touches an existing `.vibgrate/.gitignore`, so edit it (or leave it empty) to manage the ignores yourself.
+
 ---
+
+
+### vg watch
+
+Rebuild the code map when source files change (debounced). Useful for long agent sessions.
+
+```bash
+vg watch
+vg watch src/ --fast
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `[paths...]` | `.` | Folders to watch |
+| `--debounce <ms>` | `400` | Settle time after a change before rebuild |
+| `--fast` | — | Skip precise TypeScript resolve on rebuilds |
+| `--no-html` | — | Do not rewrite `graph.html` |
+| `--no-report` | — | Do not rewrite `GRAPH_REPORT.md` |
+
 
 ### vg bundle
 
@@ -636,6 +905,213 @@ vg bundle
 | `-o, --out <dir>` | `vg-bundle` | Output directory for the bundle |
 
 Add `--json` for machine-readable output.
+
+---
+
+### vg code
+
+A coding **agent** grounded in the deterministic code graph: its search tool resolves symbols and relations from the map, not text matches from a grep. It runs on a local model or a hosted one, and every change it makes to your working tree is approved before it lands.
+
+```bash
+vg code                                            # guided: pick a model, then describe tasks
+vg code "add a --timeout flag to the scan command"
+```
+
+#### Does it write to my disk?
+
+Yes — through approved steps, and only those. This is the one thing to be clear about before you run it:
+
+| You run | What happens |
+|---|---|
+| `vg code` or `vg code "<instruction>"` at a terminal | The **agent loop**. Read-only steps (search, read, list, impact) run without prompting. Every edit and every command **asks you first**, and writes when you approve. |
+| `… --auto` | The same loop with no prompts. A denylist blocks catastrophic commands. For CI and scripted runs. |
+| `… --single` | The **one-shot planner**: one proposed edit, no tool loop, no commands. **Dry-run by default** — it prints the diff and writes nothing unless you pass `--apply` *and* `--yes`. |
+| `… --mock <file>` | The one-shot path driven by a scripted reply instead of a model (offline; tests, CI, benchmarks). |
+
+The agent loop is the default. `--apply` and `--yes` belong to `--single` / `--mock` only — in the agent loop, consent is the per-step approval instead. Without a TTY and without `--auto`, `vg code` refuses to start rather than writing unattended.
+
+**How the loop works.** The model is given tools and works in steps — search the code graph, read files, check a symbol's blast radius, edit, create/delete files, and run your tests or build — until the task is done. `--max-steps <n>` caps the loop (default 24).
+
+**Guided mode.** Run `vg code` with no instruction at an interactive terminal and it walks you through everything: it builds the code map, then asks where the model should run — a local model, or one of the current top providers (Claude, GPT, Grok, Gemini, …) surfaced live from the catalog — and which model, with an "enter a slug myself" option at every step. Before pulling any local model it runs a memory pre-flight (estimated footprint vs free RAM/VRAM and already-loaded models) and won't pull a model your machine can't run; then it drops into an agent session where you describe tasks and approve each change. For scripts and CI, pass an instruction with `--auto` (or `--mock`) — the agent only prompts at a TTY, so automation never blocks.
+
+While a session is active, Vibgrate Graph (`vg serve`) runs as a separate process for the life of the session and is stopped when you exit. Every graph-backed call is attributed to VG Code and the model in use, so `vg savings` reports token/$ savings **per model**.
+
+**A full local session (no cloud):**
+
+```bash
+# one-time: a local coding model (or: vg models install)
+vg models pull qwen2.5-coder:7b
+
+# start a guided agent session — pick "Local model" → qwen2.5-coder:7b
+vg code
+```
+
+```text
+  VG Code  · graph-grounded coding · v2026.x
+
+  ✔ Code map built
+  ✔ Model catalog loaded
+  ? Where should the model run?
+  ❯ Local model (on your machine)   1 found
+    Anthropic (Claude)              via OpenRouter
+    …
+  ✔ qwen2.5-coder:7b
+  ◆ Ready — ollama/qwen2.5-coder:7b · graph 48213. Describe a task; empty line to exit.
+
+  code › add a --timeout flag to the scan command and use it
+
+    → search_code(query: --timeout flag scan command)
+      scanCommand (function) src/commands/scan.ts:12
+    → read_file(path: src/commands/scan.ts)
+      src/commands/scan.ts (40 lines): …
+    → graph_impact(symbol: runScan)
+      3 symbol(s) depend on runScan: …
+  I'll add the option and thread it through.
+    → edit_file(path: src/commands/scan.ts, …)
+--- a/src/commands/scan.ts
++++ b/src/commands/scan.ts
+@@ …
++  .option('--timeout <ms>', 'abort the scan after <ms> milliseconds')
+  ? Apply edit to src/commands/scan.ts? [Y/n] y
+      ✔ edited src/commands/scan.ts
+    → run_command(command: npm test -- scan)
+  ? Run `npm test -- scan`? [y/N] y
+      ✔ exit 0  … 12 passing
+    → finish(summary: added a --timeout flag to scan and covered it with tests)
+
+  ✔ added a --timeout flag to scan and covered it with tests
+    +6 -1 across 1 file(s) · via ollama/qwen2.5-coder:7b
+```
+
+Run it non-interactively with `vg code "add a --timeout flag to scan" --provider ollama --model qwen2.5-coder:7b --auto`, or against a hosted model with `--provider openrouter --model anthropic/claude-3.5-sonnet` (set `OPENROUTER_API_KEY`).
+
+**In a session** you can type slash-commands:
+
+| Command | What it does |
+|---|---|
+| `/undo` | Revert the files changed by the last task |
+| `/diff` | Show the last change |
+| `/model` | Switch model without leaving the session |
+| `/cost` | Running token/$ cost for the session (local models are free) |
+| `/compact` | Condense the session so far into one checkpoint recap |
+| `/clear` | Explains that each task already starts fresh — nothing to clear |
+| `/help` | List the commands |
+| `/exit` | Quit (an empty line, `exit`, or `quit` also work) |
+
+**More session controls:**
+
+- `--stream` streams the model's output live as it's generated.
+- `--verify [command]` runs your tests after the agent finishes and, if they fail, feeds the failures back so it fixes them (uses the `testCommand` from config if you don't name one).
+- `--continue [id]` resumes a session — your most recent one, or the id you name — recapping what was already done for the model and restoring `/undo`.
+- `--reasoning-effort low|medium|high` tells a reasoning-capable model how hard to think (models without the knob ignore it).
+- `--worktree` runs the session in an **isolated git worktree** under `.vibgrate/worktrees`, so an agent can work without touching your checkout. Bare `--worktree` creates one; `--worktree <id>` reuses it. Inspect and land the result with `--worktree-diff <id>` (print the delta as a patch), `--worktree-apply <id>` (apply it onto the main tree via `git apply --3way`), and `--worktree-remove <id>`.
+- `--security-tier <tier>` sets shell isolation for `run_command`: `L0` runs on the host, `L1` uses Seatbelt or bubblewrap where available (`L2`/`L3` are reserved).
+- A live **token/$ meter** shows after each task and via `/cost` (cost is shown when the model's price is known; local models are free).
+- **External MCP tools:** list servers under `mcpServers` in `.vibgrate/code.json` and the agent can call their tools (namespaced `mcp__<server>__<tool>`); read-only tools run freely, anything else is approved like a built-in mutating tool. VG Code also **adopts the standard MCP config files** already in your repo — `.mcp.json` (Claude Code), `.cursor/mcp.json` (Cursor), and `.vscode/mcp.json` (VS Code) — and merges them with your `.vibgrate/code.json` (which wins on any name clash), so servers you've already configured for another tool work here with no extra setup. Both local (`command`) and remote (`url`) servers are supported.
+
+**Tools the agent has.** Searching is the code graph (`search_code`) — not a grep. Read-only tools run without prompting; the rest are approved per step (or auto-approved under `--auto`).
+
+| Tool | What it does | Approval |
+|---|---|---|
+| `search_code` | Search the code graph: symbols and relations, plus a literal sweep for exact phrases and URLs | free |
+| `read_file` / `list_files` | Read a file (or a line range); list files known to the map | free |
+| `graph_impact` | Blast radius of changing a symbol — callers, importers, subtypes | free |
+| `library_docs` | Version-correct docs for a dependency this project actually installs | free |
+| `set_progress` | Maintain the task checklist shown during the run | free |
+| `inspect_task` / `inspect_change` / `verify_change` | Governance steps: assess the task, review a pending change, verify the result | free |
+| `edit_file` / `create_file` / `delete_file` | Change the working tree | **approved** |
+| `apply_patch` | Apply a validated PatchIR multi-op edit transactionally | **approved** per file |
+| `run_command` | Run tests, builds, or any other shell command | **approved** |
+| `read_notebook` / `edit_notebook_cell` | Read a Jupyter notebook; edit one cell | read free · edit **approved** |
+| `web_fetch` / `web_search` | Fetch a URL or search the web — results are size-capped, secret-redacted, and treated as untrusted | **approved** |
+| `browser_*` | Drive a browser: start, navigate, snapshot, click, type, stop | start/navigate **approved** |
+| `spawn_subagent` | Delegate a sub-task to a nested agent (optionally in a worktree) | **approved** |
+| `ask_user` | Ask you a question mid-task | free |
+| `finish` / `abort` | End the task with a summary, or give up | free |
+| `mcp__<server>__<tool>` | Tools from your configured MCP servers | free if read-only, else **approved** |
+
+**Safety.** The agent never sends a secrets file (`.env`, keys, credentials) to the model, and redacts stray credential shapes from any file it reads. Under `--auto`, a denylist blocks catastrophic commands (filesystem wipes, `curl … | sh`, force-push, …); interactively you see and approve each command yourself.
+
+**Configure once** in `.vibgrate/code.json` so you can then just run `vg code` (flags still override):
+
+```json
+{
+  "provider": "ollama",
+  "model": "qwen2.5-coder:7b",
+  "testCommand": "npm test",
+  "auto": false,
+  "denyCommands": ["deploy", "kubectl\\s+delete"],
+  "maxSteps": 24,
+  "mcpServers": {
+    "playwright": { "command": "npx", "args": ["-y", "@playwright/mcp"] }
+  }
+}
+```
+
+| Key | Default | Notes |
+|---|---|---|
+| `provider` | auto | `vibgrate-relay`, `ollama`, `lmstudio`, `foundry-local`, `openrouter`, `litellm`, `openai`, `together`, `llama-cpp` |
+| `model` | — | Model id/slug (or set `VG_CODE_MODEL`) |
+| `auto` | `false` | Run autonomously (auto-approve) by default |
+| `testCommand` | — | The project's test command, surfaced to the agent and used by `--verify` |
+| `denyCommands` | — | Extra regex/substring rules blocked on top of the built-in denylist |
+| `contextWindow` | model default | Override the usable context window (tokens) for compaction sizing |
+| `maxSteps` | `24` | Default step cap for the agent loop |
+| `capsule` | — | Prefer a source-bearing Task Capsule for first context (`--capsule` / `--no-capsule`) |
+| `securityTier` | `L0` | Shell isolation: `L0` host, `L1` Seatbelt/bubblewrap where available (`L2`/`L3` reserved) |
+| `modelProfile` | derived | Overrides merged onto the model-derived profile: `mode`, `capsuleBudgetTokens`, `maxRepairRounds`, `constrainedDecoding`, `securityTier` |
+| `mcpServers` | — | External MCP servers (name → launch spec), merged with `.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json`; this file wins on a name clash |
+
+A missing or malformed file is simply "no config", never an error.
+
+**How an edit is built.** It assembles a small, high-signal context from the map (the relevant symbols, their relations, the blast radius of changing them, and any hard constraints), asks the model for a minimal edit, and applies that edit through a deterministic merge so the change lands exactly where it was meant to. Before an edit is written, its replacement body is scanned against the graph's identifier trie: an edit that references a symbol the graph does not know — and that is not already local to the target file — is **blocked, not merely flagged**.
+
+**The one-shot path.** `--single` skips the tool loop and proposes a single edit. That path is dry-run by default; `--apply` walks the full inspect → assess → dry-run → approve → execute → verify → log lifecycle, and still requires your explicit `--yes` (or an interactive confirmation) — there is no write-without-consent path.
+
+```bash
+vg code "rename readCfg to readConfig everywhere it is called" --single --apply --yes
+```
+
+Pick a backend with `--provider` and `--model`. No model is bundled, and nothing is installed until you first use a backend that needs it:
+
+- **Local** — a Code Mode pack, `--provider ollama`, `--provider lmstudio`, `--provider foundry-local`, or `--provider llama-cpp --model-path <gguf>` (or `--local` to force on-device only).
+- **Vibgrate Relay** — the first-party hosted router that supplements your local models: `--provider vibgrate-relay`, authenticated with `VIBGRATE_RELAY_TOKEN` instead of a per-provider API key. Set `VIBGRATE_RELAY_URL` to point at staging or a self-hosted deployment.
+- **Other hosted** — any OpenAI-compatible endpoint: `--provider openrouter` / `litellm` / `openai` / `together`. API keys are read from the environment only (e.g. `OPENROUTER_API_KEY`), never passed as flags.
+
+With no `--provider`, `vg code` chooses from what you have already configured, best first: **Vibgrate Relay** when `VIBGRATE_RELAY_TOKEN` is set (with local fallback if Relay is unreachable), then another configured hosted key, then a locally-pulled model. It never dials a cloud endpoint you didn't set up.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `<instruction>` | — | What to change, in plain language. Omit it at a TTY for guided mode. |
+| `--provider <id>` | auto | `vibgrate-relay`, `ollama`, `lmstudio`, `foundry-local`, `openrouter`, `litellm`, `openai`, `together`, `llama-cpp` |
+| `--model <id>` | — | Model id (or set `VG_CODE_MODEL`) |
+| `--mode <mode>` | auto-fit | Code Mode: `spark` \| `flow` \| `forge` — preferred over raw model names |
+| `--model-path <gguf>` | — | GGUF path for `--provider llama-cpp` (weights are never auto-downloaded) |
+| `-f, --file <path>` | — | Restrict the edit surface to this file (repeatable) |
+| `-b, --budget <n>` | `3000` | Approx context token budget |
+| `--auto` | — | Autonomous: auto-approve every edit and command (denylist still applies) |
+| `--max-steps <n>` | `24` | Cap the number of agent steps |
+| `--single` | — | One-shot planner (single edit, no tool loop) instead of the agent |
+| `--apply` | — | `--single`/`--mock` only: write the change (still requires `--yes` or a confirmation) |
+| `--yes` | — | Consent to write, or to a first-use package install, non-interactively |
+| `--stream` | — | Stream the model output live |
+| `--verify [command]` | — | After the agent finishes, run tests and feed failures back for repair (uses `testCommand` when no command is given) |
+| `--continue [id]` | — | Resume the most recent session, or the given session id (recap + restore `/undo`) |
+| `--reasoning-effort <level>` | model default | How hard a reasoning-capable model should think: `low` \| `medium` \| `high` |
+| `--worktree [id]` | — | Run the session in an isolated git worktree under `.vibgrate/worktrees` |
+| `--worktree-diff` / `--worktree-apply` / `--worktree-remove <id>` | — | One-shot worktree review flow: print the delta, apply it onto the main tree (`git apply --3way`), or remove the checkout |
+| `--capsule` / `--no-capsule` | config | Use (or disable) a source-bearing Task Capsule for first context |
+| `--security-tier <tier>` | `L0` | Shell isolation: `L0` host, `L1` Seatbelt/bubblewrap where available |
+| `--restore-checkpoint <commit>` | — | One-shot: restore the given `--file` paths from a checkpoint commit, then exit (for host UIs) |
+| `--stream-json` | — | Machine protocol: NDJSON agent events on stdout, approval decisions on stdin (host UIs such as the VS Code panel) |
+| `--session` | — | With `--stream-json`: stay open for further turns instead of exiting after one |
+| `--mock <file>` | — | Use a scripted reply instead of a model (offline; tests/CI/benchmarks) |
+| `-o, --out <file>` | — | Write the JSON result to a file (for CI/benchmarks) |
+| `--local` (global) | — | On-device model backends only — never a hosted model. Implies `--offline` |
+
+`--stream-json` is the protocol **Vibgrate for VS Code** speaks to the CLI: the panel renders the agent's steps, approves or denies each mutating tool call over stdin, and with `--session` keeps one warm graph across turns. It is a supported surface for any host UI, not just ours.
+
+Add `--json` for the full machine-readable result (proposed changes, diffs, and the verification summary), or `--out <file>` to write it for CI. Requires a map — run `vg` first if you have not built one.
 
 ---
 
@@ -688,7 +1164,7 @@ Deterministic open facts for a node (contract, invariant, characterization).
 vg facts <name>
 ```
 
-Epistemic-typed: declared/static → observed/derived. Requires `--deep` for derived facts beyond basic declarations.
+Epistemic-typed: declared/static → observed/derived. Open facts (contract / invariant / characterization) ship on every build.
 
 | Flag | Description |
 |------|-------------|
@@ -738,17 +1214,26 @@ Add Vibgrate AI Context to your AI assistant(s) — skill, MCP wiring, and advis
 
 ```bash
 vg install [tools...]
+vg install --all
+vg install --detect
+vg install --list
 vg uninstall <tools...>
+vg uninstall cursor --purge
 ```
 
 Idempotent and repo-local (changes can be committed and shared with your team).
 
-**Supported assistants:** `claude`, `cursor`, `windsurf`, `vscode`, `codex`, `gemini`
+**Supported assistant ids:** `claude`, `cursor`, `windsurf`, `vscode`, `codex`, `gemini`, `grok`, `opencode`, `kilo`, `aider`, `factory`, `trae`, `kiro`, `amp`, `kimi`, `codebuddy`, `copilot-cli`, `pi`, `devin`, `hermes`, `openclaw`, `agents`
+
+Run `vg install --list` for the live support matrix (ids can grow over time) — it shows, per assistant, whether the install writes an MCP registration, a skill, and a nudge.
+
+**Where the MCP server is registered.** Each host reads its own config file, so `vg install` writes the one that host actually loads: `.mcp.json` (Claude Code), `.cursor/mcp.json`, `.windsurf/mcp.json`, `.vscode/mcp.json`, and `.grok/config.toml` (a `[mcp_servers.vg]` table — what `grok mcp add --scope project` writes). Assistants without an MCP entry in the matrix get the skill and nudge, and their AI reaches the graph through the `vg` CLI instead. Existing entries, sections, and comments in these files are preserved — only the `vg` entry is written.
 
 | Flag | Description |
 |------|-------------|
 | `[tools...]` | Assistant ids to install for |
 | `--all` | Install for every supported assistant |
+| `--detect` | Detect assistants in use (repo footprint, home config, PATH) and install for those; with `--list`, only report what was detected |
 | `--list` | Show the support matrix and exit |
 | `--no-hook` | Skip the advisory nudge |
 
@@ -758,6 +1243,8 @@ Idempotent and repo-local (changes can be committed and shared with your team).
 |------|-------------|
 | `<tools...>` | Assistant ids to remove (required) |
 | `--purge` | Also delete the skill file |
+
+`vg uninstall` only removes AI-assistant wiring. To remove the CLI package from the machine, use your package manager (`npm uninstall -g @vibgrate/cli`, etc.).
 
 ---
 
@@ -787,6 +1274,66 @@ vg lib refresh          # Re-ingest all local sources
 
 ---
 
+### vg locale
+
+**Vibgrate Localize** — managed localisation for your application. Locale projects, keys, and
+translations live in Vibgrate Cloud and sync with the locale files in your repo.
+
+`vg localize` is a backward-friendly alias; `vg locale` is the canonical form.
+
+```bash
+vg locale config --project <slug> [--target-languages fr-FR,de-DE] [--namespaces common,checkout]
+vg locale push [--dry-run] [--source-only]
+vg locale pull [--language <code>] [--dry-run] [--include-machine]
+vg locale save-missing [--dry-run]
+vg locale add <key> [value] [--namespace <ns>] [--language <code>]
+vg locale remove <keys...> [--namespace <ns>]
+vg locale get <key> [--namespace <ns>] [--language <code>]
+vg locale status
+vg locale format [--dry-run]
+```
+
+| Command | Description |
+|---------|-------------|
+| `vg locale config` | Create or update `vibgrate.locale.yaml` (no credentials are stored in it) |
+| `vg locale push` | Upload local locale files to Vibgrate Cloud (`vg locale sync` is an alias) |
+| `vg locale pull` | Write translations from Vibgrate Cloud into local files (`vg locale download` is an alias) |
+| `vg locale save-missing` | Create only the keys Cloud does not have yet — never overwrites a translation |
+| `vg locale add` | Add or update a single key |
+| `vg locale remove` | Remove one or more keys |
+| `vg locale get` | Show one key and its translations |
+| `vg locale status` | Coverage and health per language |
+| `vg locale format` | Re-format local locale files in place |
+
+**Local vs Cloud.** `config` and `format` only touch the filesystem — they work on any plan and make
+no network call. Everything else reads or writes Vibgrate Cloud and needs a **Team plan or above**.
+`vg locale push --dry-run` also works with no credentials, so you can preview what a push would send
+before you have logged in.
+
+**Configuration** lives in `vibgrate.locale.yaml`, which is safe to commit — the DSN is never written
+to it and resolves at call time from `--dsn`, `VIBGRATE_DSN`, or your stored login, exactly as
+`vg push` does.
+
+```yaml
+project: acme-web
+sourceLanguage: en-US
+targetLanguages: [fr-FR, de-DE]
+format: nested
+path: src/locales/{language}/{namespace}.json
+namespaces: [common, checkout]
+version: latest
+```
+
+**Formats.** `json`, `nested`, `flat`, `yaml`, and `yml` are supported today; the professional
+formats (`po`, `xliff`, `xliff2`, `android`, `strings`, `resx`, `csv`, `arb`, `properties`) report
+that they are not available yet rather than failing as unknown. Every codec round-trips, and writes
+are key-sorted so pulling twice never produces a spurious diff.
+
+**Machine translation is never silently accepted.** `pull` writes only translations a person has
+accepted; pass `--include-machine` to also write machine and needs-review entries.
+
+---
+
 ### vg map / vg hubs / vg areas / vg oddities
 
 Map-level insights — read-only views over the committed graph.
@@ -806,15 +1353,124 @@ vg oddities # Surprising cross-area links (architectural smells)
 
 ---
 
-### vg models
+### vg llm-host
 
-The local model fleet — Ollama, LM Studio, and on-disk `gguf` models — discovered entirely offline.
+Thin **enterprise inference process** (ADR-005). Code Modes and install stay on `vg models`; this host only loads weights and decodes over a local socket when isolation is `process`.
 
 ```bash
-vg models
+vg llm-host status
+vg llm-host serve                 # listen on the default runtime socket
+vg llm-host serve --socket /tmp/vg-llm.sock --yes
 ```
 
-Lists the local inference backends and models Vibgrate can see, so you know what is available without any network calls. Add `--json` for machine-readable output.
+Default isolation is **embedded** (same process as the agent). Set `VIBGRATE_INFERENCE_ISOLATION=process` to use the host. Management never moves into the host process.
+
+**First-party weights.** Code Mode packs are first-party GGUF only: `vg models install` downloads the catalogued refs into the Vibgrate weight store under the cache directory (HTTPS hosts allowlisted, including Hugging Face LFS/Xet CDNs). Catalog entries carry **sha256 pins**; a download that does not match is rejected. Ollama is used only for models you select explicitly (`vg models pull <name>`, `--provider ollama`) — never for a Code Mode pack.
+
+**Foundry Local.** On Windows (or any host running Microsoft Foundry Local), use `--provider foundry-local --model <id>` with the OpenAI-compatible server (default `http://127.0.0.1:5272/v1`, override with `FOUNDRY_LOCAL_BASE_URL`). `vg models status` lists models when the server responds.
+
+**Warm local inference (Approach B default).** Code Mode packs (channel 2026.08.1) install first-party GGUF weights and run on embedded llama.cpp only — there is no Ollama fallback in a pack. When a GGUF is on disk (weight store or `~/models`), `vg code` prefers embedded llama.cpp automatically. Set `VG_PREFER_OLLAMA=1` to try your own Ollama models first outside Code Modes. Spark constrained decoding is **fail-closed**: if the binding cannot attach a PatchIR grammar, generation errors instead of free-text (opt-in raw string GBNF only via `VG_ALLOW_GRAMMAR_STRING_FALLBACK=1`).
+
+**Identifier enforce (before apply).** Edits and `apply_patch` that invent identifiers not present in the code graph are **blocked** (not merely annotated). Identifiers already in the target file (locals, params, existing helpers) and tokens only in comments/strings are allowed. After an approved edit, the session trie updates so new symbols become legal.
+
+**Native logit mask (P1).** When node-llama-cpp exposes `TokenBias`, the warm host **boosts** tokens for graph identifiers and can **suppress** vocabulary tokens that are complete identifiers absent from the graph. Bias is cached per session/trie. Without `TokenBias`, generation still runs (post-scan annotation + enforce-before-apply remain).
+
+**Dynamic open-identifier sampler (P2).** When enabled (`VG_LLM_ON_TOKEN=1` or `VG_LLM_CUSTOM_SAMPLER=1`, or a binding that declares the hook), the host tracks whether generation is inside a code identifier and rejects tokens that invent graph-unknown names mid-decode. Composed with grammar + TokenBias on the same `prompt()` call.
+
+**Warm KV prefix reuse (P1/P2).** Prompt segments are content-hashed; after the first turn, stable system/capsule blocks are warm. A multi-turn **cursor** skips already-evaluated leading blocks and only re-evaluates the delta when the binding supports evaluate-without-generate, so multi-turn TTFT does not re-prefill the full capsule every step.
+
+**Speculative drafts (P2).** Graph-verbatim draft candidates are **ranked** against the user ask; the host tries accept in score order (evaluate-without-generate when available).
+
+**Shared host in vgd.** The daemon protocol includes `host-status`, `host-load`, `host-unload`, and `host-generate` so a long-lived process can keep a warm model for CLI and IDE clients (same session pool as embedded). Clients may pass a **client id** on load so unload is **refcounted** — CLI and VS Code can share one warm model without the first exit killing the session.
+
+**Hardware default mode.** `vg models mode --apply-recommend` pins the Code Mode recommended from free RAM/VRAM and repo size when no default is set. `vg doctor` surfaces the same recommendation under `localInference`.
+
+**Coding metrics (release).** `vg models coding-metrics` builds a `coding-metrics/0` report: host-bench arms + gates + offline Fusion FCS/ZNS trajectory pack. Default host mode is **simulate** (no GPU). CI runs simulate+gate on PRs; CLI publish opens a website data PR under `data/benchmarks-coding/` (human review before public claims), same pattern as CLI release benchmarks.
+
+**Host bench (P3).** `vg models host-bench` runs Approach B measurement arms (Ollama baseline, embedded warm, grammar, identifier enforce, TokenBias, dynamic sampler, KV delta). Default **simulate** exercises the warm host without a GPU; `--mock` is registry shells only; `--live --model-path <gguf>` is operator hardware. Add `--gate` to evaluate release gates (exit code **2** on hard failure). Use `--json` for CI artifacts.
+
+---
+
+### vg models
+
+**Code Modes** (Spark / Flow / Forge) for VG Code, plus the **local model fleet** (Ollama, LM Studio, and on-disk `gguf` files). The default view is outcome-oriented: which mode fits this machine and repo, which pack backs it, and whether it is ready.
+
+**Named install commands run by default** (same polarity as the rest of `vg`: the command does what it says). Pass `--dry-run` to print the plan only. Status/resolve never download. Destructive `rm` confirms on a TTY; non-interactive remove needs `--yes`.
+
+`install` / `pull` install the **full provider dependency closure** (e.g. runtime npm deps for llama-cpp, then the pinned GGUF from the first-party weight store; `pull` fetches your named model via Ollama). Third-party apps such as Ollama itself are never auto-installed — install them separately if the plan lists them as blocked.
+
+```bash
+vg models                 # Code Modes status + fleet summary
+vg models --raw           # local models only
+vg models status
+vg models mode [spark|flow|forge]
+vg models resolve [mode]  # pack + model + fit (no download)
+vg models install [mode]  # install the pack (add --dry-run to preview)
+vg models pin <packId>
+vg models unpin <mode>
+vg models packs
+vg models pull <name>     # download (add --dry-run to preview)
+vg models uninstall <name> # uninstall (TTY confirm; --yes for CI; --dry-run to preview)
+vg models host-bench      # Approach B measurement arms (default: simulate, no GPU)
+vg models coding-metrics  # host-bench + Fusion FCS/ZNS report (coding-metrics/0)
+vg models catalog
+```
+
+| Mode | Intent |
+|------|--------|
+| **Spark** | Fast, small footprint — quick edits and tight memory |
+| **Flow** | Balanced default for day-to-day coding |
+| **Forge** | Heavier pack when you have headroom and want more capacity |
+
+| Subcommand / flag | Description |
+|-------------------|-------------|
+| `--raw` | Skip Code Modes; list discovered local models only |
+| `mode [spark\|flow\|forge]` | Show or set the default Code Mode (`--auto` clears a fixed default) |
+| `resolve [mode]` | Resolve pack + underlying model + fit without downloading |
+| `install [mode]` | Resolve and install the pack (`--dry-run` for plan only) |
+| `pin <packId>` / `unpin <mode>` | Pin or clear a reproducible pack (e.g. `flow@2026.07.1`) |
+| `packs` | List qualified Code Mode packs |
+| `pull <name>` | Download via local runtime (default Ollama; `--dry-run` for plan only) |
+| `uninstall <name>` | Uninstall a local model — Ollama, LM Studio, or GGUF (`--dry-run` plan; TTY confirm or `--yes`; `--runtime` optional auto-detect) |
+| `host-bench` | Approach B measurement arms (`--simulate` default, `--mock`, `--live --model-path`, `--gate`) |
+| `coding-metrics` | Unified host-bench + Fusion FCS/ZNS report (`--out`, `--gate`, `--version`); publish path for release |
+| `catalog` | Live hosted model catalog (cached; not used under `--offline`) |
+| `--json` | Machine-readable JSON on stdout |
+
+```bash
+vg models pull qwen2.5-coder:7b
+vg models pull qwen2.5-coder:7b --dry-run   # plan only
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `<name>` | — | Model to pull or uninstall, e.g. `qwen2.5-coder:7b` or a `.gguf` basename |
+| `--runtime <id>` | pull: `ollama` · uninstall: auto | Runtime (`ollama`, `lm-studio`, `gguf`). Uninstall auto-detects from the installed fleet when omitted. |
+| `--dry-run` | — | Print the plan only; do not download or uninstall |
+| `--yes` | — | Skip interactive confirms (required for non-interactive `uninstall`) |
+
+---
+
+### vg module
+
+Manage the **optional local modules** — separately-licensed engines the CLI can load through a narrow seam. Two are supported today: `relevance` (semantic ranking kernel) and `hcs` (the [HCS](#holistic-code-specification-vg-hcs) engine behind `vg hcs`).
+
+```bash
+vg module status                  # what is installed, and whether it loads
+vg module install hcs             # fetch + unpack (prompts once, unless --yes)
+vg module install relevance --force
+vg module remove hcs
+```
+
+Installation fetches the module from the npm registry **as a plain tarball**, verifies its integrity, and unpacks it into the Vibgrate cache. Your project is never touched, and nothing from the tarball executes at install time. State is per-user, not per-repo, and your answer to the prompt is recorded — a decline is remembered, so nothing re-prompts on every run.
+
+| Subcommand | Description |
+|------------|-------------|
+| `status` | Installed modules, their versions, whether the seam can load them, and your recorded consent |
+| `install <name>` | Install a module (`--yes` to skip the prompt, `--force` to reinstall) |
+| `remove <name>` | Delete an installed module |
+
+Set `VIBGRATE_NO_KERNEL=1` to disable optional modules entirely — installs are refused and commands that need an engine exit with `6` ([`ENGINE_UNAVAILABLE`](#exit-codes)) rather than silently degrading. `vg module status` reports the disabled state. Add `--json` to any subcommand for machine-readable output.
 
 ---
 
@@ -848,6 +1504,7 @@ Reads the counts-only usage ledger recorded when you run `vg serve --savings` (o
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--days <n>` | `30` | Reporting window in days |
+| `--clear` | — | Delete the recorded usage data for this repo (the ledger under `.vibgrate/cache/`, plus the opt-in stats-share upload state and per-install id) |
 
 Add `--json` for machine-readable output.
 
@@ -855,7 +1512,7 @@ Add `--json` for machine-readable output.
 
 ### vg serve
 
-Start [Vibgrate AI Context](https://vibgrate.com/library) — a local-first [MCP](https://vibgrate.com/glossary/model-context-protocol) serving your code map, drift, and version-correct docs to your AI assistant (fully offline under `--local`).
+Start [Vibgrate AI Context](https://vibgrate.com/library) — a local-first [MCP](https://vibgrate.com/glossary/model-context-protocol) serving your code map, drift, and version-correct docs to your AI assistant (fully offline under `--offline`).
 
 ```bash
 vg serve
@@ -867,17 +1524,19 @@ vg serve
 | `--port <n>` | `7437` | Port for `--http` |
 | `--host <h>` | `127.0.0.1` | Host for `--http` |
 | `--savings` | — | Record local, counts-only usage savings (opt-in) |
-| `--share-stats` | — | Also upload the counts-only usage ledger to Vibgrate to improve the local MCP (opt-in; off by default; implies `--savings`; disabled under `--local`) |
+| `--share-stats` | — | Also upload the counts-only usage ledger to Vibgrate to improve the local MCP (opt-in; off by default; implies `--savings`; disabled under `--offline`) |
 | `--dedup` | — | Collapse a node's heavy relation lists on repeat reads within a session, to save tokens (opt-in) |
 | `--no-refresh` | — | Serve the map as built; skip the auto-rebuild when files change |
 
 Via stdio (default), your AI assistant spawns the server. Via `--http`, it runs as a local HTTP endpoint for browser or shared access.
 
-**Usage stats — local by default, sharing is opt-in.** `--savings` records a *counts-only* ledger under `.vibgrate/` — per navigation call: which tool, how it resolved (complete/partial/miss), the vg-vs-grep token figures, whether it came over the MCP (`mcp`) or the `vg` CLI (`cli`), and a coarse client label (which AI). `vg savings` reports it locally; nothing leaves your machine. `--share-stats` additionally uploads that same counts-only ledger to Vibgrate periodically, so we can see how the local MCP is used and improve it. It **never** sends code, file paths, question text, repo identity, or any credential — only counts, outcomes, token figures, the vg version, your OS/arch, and a random per-install id. It's off unless you pass the flag, is disabled entirely under `--local`, and the endpoint can be overridden with `VIBGRATE_STATS_ENDPOINT`.
+**A live status display shows what the server is doing for you.** While `vg serve` runs in a terminal, a status block on stderr updates in place: uptime, which AI clients are connected (detected from the MCP handshake), calls and average response time per tool, and — for the navigation tools with a grep/read baseline — the context tokens served vs the estimated tokens a grep-and-read agent would have burned instead, with the estimated saving labelled as such. Outside a terminal (when your assistant spawns the server) it degrades to a quiet one-line heartbeat in the server logs every 15 minutes, and only when there has been activity. The display is in-memory only and always on — nothing is written to disk or uploaded (recording and sharing below stay opt-in) — and `--quiet` turns it off.
+
+**Usage stats — local by default, sharing is opt-in.** `--savings` records a *counts-only* ledger under `.vibgrate/` — per navigation call: which tool, how it resolved (complete/partial/miss), the vg-vs-grep token figures, whether it came over the MCP (`mcp`) or the `vg` CLI (`cli`), and a coarse client label (which AI). `vg savings` reports it locally; nothing leaves your machine. `--share-stats` additionally uploads that same counts-only ledger to Vibgrate periodically, so we can see how the local MCP is used and improve it. It **never** sends code, file paths, question text, repo identity, or any credential — only counts, outcomes, token figures, the vg version, your OS/arch, and a random per-install id. It's off unless you pass the flag, is disabled entirely under `--offline`, and the endpoint can be overridden with `VIBGRATE_STATS_ENDPOINT`.
 
 **Attributing CLI calls.** The MCP path detects the calling client automatically from the connection handshake. For CLI calls, pass `--client=<ai>` (e.g. `vg "how does auth work" --client=claude`) so the call is attributed in `vg savings` and any shared stats — this is what `vg install` writes into each assistant's skill. Without `--client`, a bare `vg ask` records nothing.
 
-**The map stays fresh while you (or your AI) edit code.** Each tool call runs a cheap stat-only freshness check against the last build; when files really changed, the server rebuilds the map incrementally in-process — only changed files re-parse — and answers from the updated graph. Probes are debounced with a self-tuning cadence (2s floor, scaling with measured probe cost so probing never exceeds a few percent of serve time even on very large repos), rebuilds are single-flight and cross-process locked, and touch-only changes (a `git checkout`, a re-save with identical content) are recognized by content hash and never trigger a rebuild. There is no filesystem watcher and no daemon: freshness is checked exactly when it matters — at query time. The server also hot-reloads `graph.json` whenever it changes on disk, so an external `vg` build is picked up on the next call too.
+**The map stays fresh while you (or your AI) edit code.** Each tool call runs a cheap stat-only freshness check against the last build; when files really changed, the server rebuilds the map incrementally in-process — only changed files re-parse — and answers from the updated graph. Probes are debounced with a self-tuning cadence (2s floor, scaling with measured probe cost so probing never exceeds a few percent of serve time even on very large repos), rebuilds are single-flight and cross-process locked, and touch-only changes (a `git checkout`, a re-save with identical content) are recognized by content hash and never trigger a rebuild. There is no filesystem watcher: freshness is checked exactly when it matters — at query time. (`vg daemon` is a separate optional process for multi-workspace IDE/agent sessions; `vg serve` does not require it.) The server also hot-reloads `graph.json` whenever it changes on disk, so an external `vg` build is picked up on the next call too.
 
 The server exposes read-only tools your assistant can call over the code map and dependency data, including:
 
@@ -887,7 +1546,7 @@ The server exposes read-only tools your assistant can call over the code map and
 - `upgrade_impact` — what an upgrade will cost: version distance, how many files import the package, the vulnerabilities it fixes, and — with `changelog: true` — online breaking-change notes between your version and the latest.
 - `resolve_library`, `library_docs` — version-correct, drift-annotated library docs.
 
-All tools are read-only. The server is local-first: it always answers from your machine when it can, and its only network touches are the embedder's one-time model fetch, `upgrade_impact`'s `changelog`, and `library_docs`' fall-through to the hosted catalog when the local docs for a library are thin or missing. `--local` is the hard airgap — it disables all three.
+All tools are read-only. The server is local-first: it always answers from your machine when it can, and its only network touches are the embedder's one-time model fetch, `upgrade_impact`'s `changelog`, and `library_docs`' fall-through to the hosted catalog when the local docs for a library are thin or missing. `--offline` is the hard airgap — it disables all three.
 
 ---
 
@@ -899,7 +1558,7 @@ Make the code map committable and auto-updating for your team.
 vg share
 ```
 
-Installs a pre-commit hook, deterministic merge driver, and `.gitignore` so the map stays fresh without any manual steps.
+Installs a pre-commit hook, deterministic merge driver, and `.gitignore` so the map stays fresh without any manual steps. This rewrites the default `.vibgrate/.gitignore` (which ignores the graph artifacts, `graph.json` included) so `graph.json` is committed while the cache and volatile reports stay ignored.
 
 | Flag | Description |
 |------|-------------|
@@ -991,6 +1650,236 @@ Surfaces the symbols and imports the resolver could not tie to a definition, ord
 | `-n, --limit <n>` | `20` | How many to show |
 
 Add `--json` for machine-readable output.
+
+---
+
+## Holistic Code Specification (vg hcs)
+
+`vg hcs` turns source into a stream of **deterministic code facts** — one NDJSON line per fact — and then renders, maps, gates, and validates that stream. Same code in, same facts out, on every machine: the whole pipeline is reproducible, so a fact stream is something you can commit, diff, and gate CI on.
+
+Extraction currently covers **Rust, Ruby, PHP, Dart, Swift, Scala, C++, COBOL, and VB6** — including the legacy stacks that rarely have any machine-readable specification at all. The engine reports its own supported set, and `--language` accepts anything in it; an unsupported value lists the valid ones.
+
+**The engine is an optional module.** All HCS computation (fact parsing, decoding, scoring, diffing, rendering) runs inside `@vibgrate/hcs-engine`, a separately-licensed WASM sandbox that makes **no network calls and spawns no processes**. The CLI side is plumbing only — read input, call the engine, write output — so every host gets byte-identical results. The module is auto-provisioned on first use (one-line notice), or install it up front with [`vg module install hcs`](#vg-module).
+
+When the engine is missing and cannot be fetched, every `vg hcs` subcommand exits **`6` (`ENGINE_UNAVAILABLE`)** — deliberately distinct from `2` (`GATE_FAILED`), so CI can never read "engine missing" as a gate verdict.
+
+**Typical path:** `vg hcs extract` → `vg hcs digest` (read it) / `vg hcs map` (see the system) / `vg hcs gate` (guard CI).
+
+```bash
+vg hcs extract -o facts.ndjson              # facts for the current tree
+vg hcs digest --in facts.ndjson --format md # a readable specification
+vg hcs map --facts facts.ndjson --format mermaid
+vg hcs gate --baseline main.ndjson --facts facts.ndjson
+```
+
+### vg hcs extract
+
+Extract facts from source into an NDJSON stream. Test files are excluded by default; the walk skips vendored, build, and dependency directories, and files above 2 MiB.
+
+```bash
+vg hcs extract [dir] -o facts.ndjson
+vg hcs extract src --language rust --include-tests
+```
+
+**Incremental by default.** When the output stream already exists, extraction is incremental: the engine plans from the previous stream's file-hash index, the CLI re-extracts only added and changed files, and the engine merges — reusing unchanged facts byte-for-byte. So a repeated `-o` run costs only the delta, with output identical to a full extraction. Point `--previous` at a different stream to keep the state file separate from the output, or pass `--full` to re-extract everything from scratch (the merged result still refreshes the index, so the next run stays incremental).
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `[dir]` | `.` | Directory to extract from |
+| `--language <lang>` | all supported | Extract only this language |
+| `--include-tests` | — | Include test files (excluded by default) |
+| `-o, --out <file>` | stdout | Write the NDJSON stream to a file |
+| `--previous <file>` | the `--out` file | Previous stream to update incrementally (missing file ⇒ full extraction) |
+| `--full` | — | Ignore the previous stream and re-extract every file |
+
+### vg hcs digest
+
+Render a fact stream as a human-readable specification.
+
+```bash
+vg hcs extract | vg hcs digest --format md -o SPEC.md
+vg hcs digest --in facts.ndjson --format html --level full --title "Payments service"
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--in <file>` | stdin | NDJSON fact stream to read |
+| `-o, --out <file>` | stdout | Write output to a file |
+| `--format <format>` | `md` | `md`, `json`, or `html` |
+| `--level <level>` | `concise` | `concise` or `full` |
+| `--title <title>` | — | Override the document title |
+
+### vg hcs map
+
+Build the **System Map** from a fact stream — the components, their relations, and the structure they imply.
+
+```bash
+vg hcs map --facts facts.ndjson --format mermaid
+vg hcs map --facts facts.ndjson --profile migration -o map.json
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--facts <file>` | stdin | NDJSON fact stream to read |
+| `-o, --out <file>` | stdout | Write output to a file |
+| `--format <format>` | `json` | `json`, `md`, or `mermaid` |
+| `--profile <profile>` | — | Consumer projection: `integration`, `migration`, or `governance` |
+
+Pass the global `--generated-at <iso>` to pin the artifact timestamp for byte-deterministic output.
+
+### vg hcs gate
+
+The **governance gate**: diff two fact streams and fail on material structural regressions. This is the CI-facing command.
+
+```bash
+vg hcs gate --baseline main.ndjson --facts pr.ndjson --format sarif -o hcs.sarif
+vg hcs gate --baseline main.ndjson --facts pr.ndjson --policy .vibgrate/hcs-gate.json
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--baseline <file>` | *required* | Baseline NDJSON facts (the "before" stream) |
+| `--facts <file>` | stdin | Current NDJSON facts (the "after" stream) |
+| `--policy <file>` | — | Gate policy JSON — thresholds and disabled rules |
+| `-o, --out <file>` | stdout | Write the result to a file |
+| `--format <format>` | `text` | `text`, `json`, or `sarif` |
+
+Exit codes: `0` when the gate passes, **`2`** on a material structural regression, `6` when the engine is unavailable.
+
+### vg hcs validate
+
+Validate a fact stream against the HCS spec. Exits with the spec's Appendix-I conformance code, so a malformed stream is caught before anything downstream consumes it.
+
+```bash
+vg hcs validate facts.ndjson
+vg hcs validate facts.ndjson --json
+```
+
+Add `--json` for the full machine-readable report (every error with its code and fact id).
+
+---
+
+## Diagnostics, IDE & runtime
+
+Setup health, IDE language server, local workspace daemon, and context-policy pins.
+
+**Typical path:** `vg doctor` → `vg lsp` → `vg daemon`
+
+### vg daemon
+
+Local workspace daemon for multi-root graph sessions used by IDE extensions and coding agents. Tracks registered repository roots, can load a built map into an in-memory active graph, and answers structural queries and impact over a local socket. Does not rewrite your source tree.
+
+Most developers never need this directly — Vibgrate for VS Code and `vg code` attach when needed. Use the CLI for explicit control, multi-root federation, or scripting.
+
+```bash
+vg daemon status
+vg daemon ensure
+vg daemon start
+vg daemon stop
+vg daemon restart
+vg daemon register
+vg daemon list
+vg daemon federation
+vg daemon publish
+vg daemon query "<text>"
+vg daemon impact <symbol>
+vg daemon graphs
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `status` | Whether the daemon is running and how many workspaces it tracks |
+| `start` | Run in the foreground (Ctrl-C to stop) |
+| `ensure` | Start in the background if not already running (idempotent; for hosts and agents) |
+| `stop` | Stop the running daemon (idempotent — succeeds if none is running) |
+| `restart` | Stop the daemon if running, then start it in the background (`vg update` does this automatically after installing a new version) |
+| `register [root]` | Register the current (or given) repository with a running daemon |
+| `list` | List registered workspaces |
+| `federation [root]` | Register a multi-root federation from `.vibgrate/federation.json` (or primary cwd) |
+| `publish [root]` | Load the workspace code map into the daemon active graph (run `vg build` first). The daemon reads the map from disk itself, binary snapshot first — nothing heavy crosses the socket |
+| `query <query...>` | Lexical/structural query against the active graph |
+| `impact <symbol>` | Blast radius for a symbol in the active graph |
+| `graphs` | List multi-branch graph slots currently resident |
+
+| Flag | Description |
+|------|-------------|
+| `--socket <path>` | Override the local socket path |
+| `--repository-id <id>` | On `query` / `impact` / `graphs`: target a workspace id from `vg daemon list` |
+| `--git-ref <ref>` | On `publish` / `query` / `impact`: branch or SHA |
+| `--limit <n>` | On `query`: max matches (default 12) |
+| `--depth <n>` | On `impact`: max dependency depth (default 4) |
+| `--json` | Machine-readable JSON on stdout |
+
+Typical host flow:
+
+```bash
+vg build
+vg daemon ensure
+vg daemon publish
+vg daemon query "payment service"
+```
+
+---
+
+### vg doctor
+
+One read-only diagnostic pass over setup: which config file won, which credential source won (secrets never printed), whether a code map exists and how fresh it is, hosted catalog reachability, what `vg install` would register as the MCP launch, telemetry opt-outs, and **local inference** (Code Mode recommendation from free RAM/VRAM, weight catalog pin status, warm host pool size, isolation / sampler env). Prints state; changes nothing.
+
+```bash
+vg doctor
+vg doctor --json
+vg doctor --local
+```
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Machine-readable JSON on stdout |
+| `--offline` | Skip the hosted reachability probe |
+| `-C, --cwd <dir>` | Run as if started in that directory |
+
+---
+
+### vg lsp
+
+Start the Vibgrate language server over **stdio** — the shared engine behind **Vibgrate for VS Code** and other thin IDE clients. Editors spawn this; humans rarely run it by hand.
+
+```bash
+vg lsp
+vg lsp --diagnostics
+vg lsp --no-graph
+vg lsp --no-semantic
+vg lsp --local
+```
+
+| Flag | Description |
+|------|-------------|
+| `--diagnostics` | Also publish Problems-panel diagnostics (EOL runtime, unmaintained packages, license change). **Off by default** — drift is not a defect, and the Problems panel is not filled by default. |
+| `--no-graph` | Skip the local code graph entirely: no background build; graph queries report it as turned off |
+| `--no-semantic` | Never use semantic search for graph queries (lexical only; embedding model is not downloaded) |
+| `--offline` | Never touch the network (air-gapped editor sessions) |
+
+The process owns stdin/stdout until the client sends `shutdown` + `exit`. Speaks standard LSP plus a custom `vibgrate/score` notification carrying the DriftScore and its **band** (never a colour) so clients can theme correctly.
+
+---
+
+### vg policy
+
+Show the production **context-policy** pin used by VG Code ranking, and verify a signed `context-policy-patch/0` JSON file before any release that would bump it. Learning never mutates production policy from a single task.
+
+This is not the hosted workspace policy UI in Vibgrate Cloud (banned packages, drift budgets). For dependency bans in CI, use `vg drift --fail-on standards` with a committed standards file.
+
+```bash
+vg policy
+vg policy --json
+vg policy verify ./context-policy-patch.json
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| *(default)* | Print production pin and ranking version |
+| `verify <file>` | Verify a `context-policy-patch/0` JSON file (hash + optional signature + production gate) |
+
+Exit non-zero from `verify` when the production gate is not ready (so CI can block a premature bump).
 
 ---
 
@@ -1109,6 +1998,7 @@ const config: VibgrateConfig = {
     securityPosture: { enabled: true },
     securityScanners: { enabled: true },
     serviceDependencies: { enabled: true },
+    databaseSchema: { enabled: true },
   },
 };
 
@@ -1164,7 +2054,34 @@ Beyond the core drift score, Vibgrate runs a suite of extended scanners that col
 - Are **read-only** — they never write files or execute project code
 - Run **in parallel** — failures in one scanner never affect the others
 - Can be **individually toggled** in the config
-- Collect **zero sensitive data** — no source code, no secrets, no PII
+- Collect **zero sensitive data** — no secrets, no PII, and no credentials, even the ones that do open source files (below)
+
+The core drift score is manifest/lockfile-only. Several extended scanners, and
+the code graph (`vg build`/`vg map`/`vg share`/`vg serve`), go further and open
+your source files locally — that is how they work, not an accident:
+
+| Reads source locally | What it extracts | Keeps raw text? |
+|---|---|---|
+| **Code graph** (`vg build`/`vg map`) | Symbol names, call edges, file paths, hubs/areas — the graph itself | No — never a source line, only structural graph facts |
+| **Code Quality** (`codeQuality`) | Cyclomatic complexity, function length, nesting depth, dead code, "god files" | No — computed metrics only |
+| **Breaking Change Exposure** (`breakingChangeExposure`) | Import/usage-pattern hit counts for majorly-outdated packages | No — counts only |
+| **Database Schema** (`databaseSchema`) | Table/model names, column names and types, relation/key flags from SQL/Prisma/Drizzle/TypeORM files | No — never a query, row, or credential |
+| **UI Purpose** (`uiPurpose`) | Route/nav/title/CTA copy, for feature detection | **Yes** — short evidence samples of the literal UI text are kept locally (never business logic, never a full file) |
+
+None of this is executed, and **nothing above leaves your machine** unless you
+run `vg share`/`vg push` or scan with a DSN configured — and even then, what
+uploads is the computed/structural output in the table above, never a raw
+source file. Each of these is individually toggleable; set the matching
+`scanners.<name>.enabled` to `false` (or `scanners: false` for all extended
+scanners, which does not affect the code graph) if you don't want the read to
+happen at all. See [Scanner Toggles](#scanner-toggles) above and each
+scanner's own section below.
+
+The one exception where code truly leaves your machine is the **remediation
+agent**: when you ask it to write a fix, it clones your repository into an
+isolated virtual machine Vibgrate controls, makes the change, and hands you a
+pull request. That only happens when you ask for it. See
+[vibgrate.com/subprocessors](https://vibgrate.com/subprocessors) for who processes what.
 
 ### Platform Matrix
 
@@ -1298,6 +2215,30 @@ Maps external service and platform dependencies by detecting SDK packages:
 | Databases     | PostgreSQL, MongoDB, Redis       |
 | Messaging     | SQS, SNS, Kafka, BullMQ          |
 | Observability | Sentry, DataDog, New Relic       |
+
+### Database Schema
+
+Extracts structural database-schema facts across five sources — Prisma
+(`schema.prisma`), raw SQL migrations (`.sql` files), SQL Server database
+projects (`.sqlproj`), Drizzle (`pgTable`/`mysqlTable`/`sqliteTable`), and
+TypeORM (`@Entity()` classes) — merged into one report:
+
+- Table/model names, per-field name and type, and relation/list/optional/id/unique flags
+- Enum names and values (Prisma)
+- Datasource providers (e.g. `postgresql`, `mysql`) — never the connection-string `url`
+- Files scanned, with a per-project breakdown
+
+Only structural facts are ever extracted — never a raw source line, a query,
+or a connection string/credential (any `scheme://user:pass@host` line is
+stripped as defense in depth even though hand-written SQL rarely embeds one).
+Reading these facts means opening `.sql`/`.prisma`/ORM source files locally —
+see the table at the top of this section for how this compares to the code
+graph and the other scanners that also read source. It's on by default; disable it with
+`scanners.databaseSchema.enabled: false` in `vibgrate.config.ts` (see
+[Scanner Toggles](#scanner-toggles)). Like every extended scanner, results
+only leave your machine when you run `vg push` or scan with a DSN configured
+— and the models/fields/files arrays are capped before upload so a
+large-monorepo schema can't balloon the payload.
 
 ### Architecture Layers
 
@@ -1457,13 +2398,42 @@ What it **does** collect:
 
 ---
 
+## `--offline` vs `--local`
+
+Two different questions, so two flags:
+
+| Flag | Question it answers | Effect |
+| --- | --- | --- |
+| `--offline` | May this reach the network? | No model download, no catalog fetch, no upload. Available on every command. |
+| `--local` | Where does inference run? | On-device backends only, never a hosted model. Consumed by [`vg code`](#vg-code). |
+
+**`--local` implies `--offline`**, so anything that already passes `--local`
+keeps its exact behaviour. The converse does not hold, and deliberately so:
+forcing on-device inference is a choice you may want on a fully connected
+machine — for privacy, cost, or latency — and `--offline` would not say it.
+
+`vg scan --offline` and `vg evidence --offline` mean the same thing they always
+have.
+
+---
+
 ## Exit Codes
 
-| Code | Meaning                        |
-| ---- | ------------------------------ |
-| `0`  | Success                        |
-| `1`  | Runtime error                  |
-| `2`  | `--fail-on` threshold exceeded |
+CI and agents branch on these, so they are a stable contract.
+
+| Code | Name                  | Meaning                                                                                  |
+| ---- | --------------------- | ---------------------------------------------------------------------------------------- |
+| `0`  | `OK`                  | Success                                                                                    |
+| `1`  | `ERROR`               | Runtime error                                                                              |
+| `2`  | `GATE_FAILED`         | A gate failed: `--fail-on` threshold exceeded, a drift budget breached, `vg hcs gate` regression, `vg bisect --assert` unsatisfied |
+| `3`  | `NOT_FOUND`           | The thing asked for does not exist (unknown symbol, no version history, …)                 |
+| `4`  | `NON_DETERMINISTIC`   | A verification found output that is not reproducible                                       |
+| `5`  | `USAGE_ERROR`         | Bad invocation: unknown command, invalid flag value, missing argument                      |
+| `6`  | `ENGINE_UNAVAILABLE`  | A required optional module is not installed and could not be fetched (see [`vg module`](#vg-module)) |
+
+`6` is deliberately distinct from `2`: a CI gate must never read "engine missing" as a gate verdict.
+The same rule is why [`vg review`](#vg-review) exits `6` when there is no code map, and why `--explain`
+exits `6` rather than quietly producing a review no model contributed to.
 
 ---
 
@@ -1498,7 +2468,7 @@ import type {
 - [Vibgrate AI Context (local-first MCP)](https://vibgrate.com/library)
 - [Vibgrate Graph](https://vibgrate.com/graph)
 - [Vibgrate Cloud](https://vibgrate.com/cloud) · [create a free workspace](https://dash.vibgrate.com)
-- [Vibgrate MCP (hosted)](https://vibgrate.com/mcp)
+- [Vibgrate Cloud MCP](https://vibgrate.com/mcp)
 - [AI agent skills](https://vibgrate.com/skills)
 - [Glossary](https://vibgrate.com/glossary)
 - [Help center](https://vibgrate.com/help)

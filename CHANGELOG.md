@@ -14,6 +14,119 @@ backward compatible.
 
 ### Added
 
+- **`vg hcs` — Holistic Code Specification command group** — `extract`,
+  `digest`, `map`, `gate`, and `validate` over deterministic NDJSON fact
+  streams. All HCS computation runs in the optional, separately-licensed
+  engine module (`@vibgrate/hcs-engine`), auto-provisioned on first use or via
+  `vg module install hcs`, executing in a local WASM sandbox (no network, no
+  process spawns). `vg module` now manages both `relevance` and `hcs`.
+- **Exit code `6` (`ENGINE_UNAVAILABLE`)** — a required optional module is not
+  installed and could not be fetched. Deliberately distinct from `2`
+  (`GATE_FAILED`) so CI can never read "engine missing" as a gate verdict.
+- **`vg hcs extract` is incremental by default** — a run that writes over an
+  existing stream (`-o`) re-extracts only added and changed files and reuses
+  every unchanged fact byte-for-byte, so repeat runs cost the delta rather than
+  the repository. The engine plans from the previous stream's file-hash index
+  and merges the result, and output stays identical to a full extraction. Point
+  `--previous <file>` at a separate state stream, or pass `--full` to
+  re-extract everything (the merged output still refreshes the index, so the
+  next run stays incremental).
+- **`vg code` session power features** — `--worktree [id]` runs a session in an
+  isolated git worktree under `.vibgrate/worktrees`, with `--worktree-diff`,
+  `--worktree-apply` (`git apply --3way`), and `--worktree-remove` to inspect,
+  land, or drop the delta; `--continue <id>` resumes a named session, not just
+  the latest; `--reasoning-effort low|medium|high` drives the thinking budget
+  on models that expose the knob; `--security-tier` selects shell isolation
+  (`L0` host, `L1` Seatbelt/bubblewrap where available); and
+  `--stream-json --session` keeps one warm graph across turns for host UIs.
+
+- **Change-scoped precise resolution (incremental tsc)** — the TypeScript
+  checker rung now caches per-file results under a key covering the file's
+  content, its transitive import closure, and the shard's ambient surface
+  (`.d.ts` / `declare global` / tsconfig). A warm refresh re-runs the checker
+  only for changed files and their reverse-dependency closure instead of the
+  whole corpus: on a ~600-file repo, a single-file warm rebuild drops from
+  ~6.0s to ~2.1s and a no-change rebuild to ~1.1s, with output byte-identical
+  to a cold full rebuild (enforced by the mutation-corpus identity gate, which
+  now also covers ambient-declaration edits). Disable with `--no-cache`.
+- **ESM emitted-extension import resolution** — relative imports written
+  against emitted files (`./x.js` for `x.ts`, `.mjs`→`.mts`, `.jsx`/`.cjs`
+  likewise, the standard ESM-in-TypeScript style) now resolve to their source
+  files in the heuristic rung. On ESM-style codebases this turns thousands of
+  imports previously recorded as external into real file→file edges —
+  sharper import graphs, and the dependency closures the incremental tsc
+  cache keys on.
+
+- **Global-store maps are now snapshot-only** — builds that write to the
+  global application store (the default layout) skip the large pretty-JSON
+  serialize entirely and write just the binary snapshot: ~1s faster XL builds
+  and ~60% less disk per branch-keyed map. Everywhere a human or git can see
+  the artifact — `vg share`, `VIBGRATE_GRAPH_IN_REPO=1`, an explicit
+  `--graph` path — the canonical `graph.json` is still written exactly as
+  before, and `vg bundle`/`vg export` materialize JSON from the snapshot on
+  demand, so every sharing and interchange surface stays JSON. A stale
+  `graph.json` left in the store by an older CLI is cleaned up so downgrades
+  can never serve an outdated map.
+
+- **Binary graph snapshot for fast loads** — builds now write a compact binary
+  sidecar (`graph.snap`, MessagePack) beside `graph.json`, and every loader
+  (`vg ask`/`show`/`impact`, `vg serve`, `vg code`) prefers it: ~2.6× faster
+  cold graph loads and ~40% of the on-disk size on large maps, with a lower
+  peak-memory load path. `graph.json` is unchanged and stays the canonical,
+  committed, shareable artifact — the snapshot is a derived cache that is
+  checksummed, invalidated automatically whenever `graph.json` changes (or the
+  CLI version does), regenerated transparently on the next load (existing
+  JSON-only map directories self-heal, no migration needed), and ignored by
+  git alongside the other local artifacts.
+
+- **Vue/Svelte/Astro single-file components are now part of the code graph** —
+  `.vue`, `.svelte`, and `.astro` files were previously invisible to the map,
+  so `vg impact` (and every other navigation command) missed callers that live
+  inside components. The script region of an SFC (`<script>`/`<script setup>`
+  blocks, Astro frontmatter) is now extracted with a position-preserving mask
+  and parsed with the JS/TS grammars, so defs, calls, and imports land on
+  their true lines in the original file. Imports of `./Foo.vue`
+  (extension-bearing or extensionless) resolve to the component, and imports
+  from a component into plain `.ts`/`.js` modules resolve back — impact blast
+  radius in Vue/Svelte/Astro apps now includes component usage sites.
+- **Coverage expansion: Objective-C, OCaml, ReScript, Solidity, and template
+  containers** — four more grammar-backed languages join the graph
+  (`.m`/`.mm`, `.ml`/`.mli`, `.res`, `.sol`), with defs, calls (including ObjC
+  message sends and Solidity `emit`s), imports, and inheritance extracted; and
+  the SFC masking mechanism now also covers inline `<script>` blocks in plain
+  HTML (`.html`/`.htm`), ERB templates (`.erb`, parsed as Ruby), and EJS
+  templates (`.ejs`, parsed as JavaScript), all with true line numbers. Elm
+  was evaluated but its prebuilt grammar predates the web-tree-sitter
+  compatibility floor, so it is deliberately excluded for now.
+- **Installed assistant instructions are versioned and self-updating** — the
+  skill and nudge files `vg install` writes now carry a `vg:v<N>` marker, and
+  every successful `vg` build brings previously-installed copies up to the
+  current content version automatically (only files with vg's own marker or
+  the exact legacy generated content are touched; removing the marker line
+  opts a file out permanently, and nudge refreshes rewrite only the vg block
+  inside CLAUDE.md/AGENTS.md). The instructions themselves now **strongly
+  recommend the MCP tools over the CLI** — the warm server answers in
+  milliseconds while each CLI call pays Node startup plus a fresh map parse —
+  with the CLI positioned as the fallback when no server is available.
+- **A terminal `vg serve` now shows the traffic of the assistant's own
+  spawned server** — stdio MCP servers are launched by the client, so the
+  serve process an operator watches in a terminal never receives the
+  assistant's tool calls itself. Serve processes now share their live,
+  counts-only session stats over an ephemeral per-process file under
+  `.vibgrate/cache/serve-live/` (written by non-interactive serves, folded
+  into the interactive display, swept on exit/staleness), and the dashboard
+  notes how many assistant-spawned servers are online. Same privacy posture
+  as the display itself: counts, tool names, and coarse client labels only —
+  local, ephemeral, never uploaded.
+- **The live `vg serve` status display now counts CLI calls too** — an agent
+  that shells out to the CLI (`vg impact <name> --client=claude`) records into
+  the local ledger from a separate process, which previously left the serve
+  dashboard frozen at "waiting for your assistant's first tool call". The
+  display now tails the ledger while serving and folds in CLI-sourced calls,
+  with an mcp-vs-cli split in the header and honest avg-ms handling (CLI
+  lines carry no wall time and are never counted as 0 ms). Counts only,
+  in-process, nothing uploaded — same privacy posture as before.
+
 - **Memory safeguards for the graph build** — a pathological corpus (a
   vendored 200 MB bundle, a million-file tree, a giant TypeScript program) can
   no longer OOM-kill `vg build` / `vg scan`. Files over a per-file size cap
@@ -66,6 +179,56 @@ backward compatible.
   priorities) directly on GitHub, so you can see the product before installing.
   The asset is a deterministic, regenerable SVG (`docs/demo/cli-demo.svg`,
   rebuilt with `pnpm demo:svg`).
+- **`databaseSchema` extended scanner documented, capped, and now actually
+  reaches Vibgrate Cloud** — the scanner (structural facts only, from Prisma/
+  SQL migrations/`.sqlproj`/Drizzle/TypeORM; never a raw source line, query, or
+  credential) is on by default and disabled per the [Database
+  Schema](./DOCS.md#database-schema) docs via
+  `scanners.databaseSchema.enabled: false`, same as any other extended
+  scanner — it just wasn't written down before. Upload compaction now caps its
+  models/fields/files (300 models, 100 fields/model, 5 files/model, 500
+  scanned files) so a schema-heavy monorepo can't dominate the artifact
+  payload the way uncapped scanners could. Separately, the server-side ingest
+  schema was missing this field entirely, so `databaseSchema` was silently
+  stripped on every `vg push` — the Cloud dashboard's database tab only ever
+  had data for locally-viewed scans, never pushed ones. Both are fixed.
+
+### Fixed
+
+- **`vg update` now verifies the daemon it restarts is actually on the new
+  build** — while the install had the socket free, another client (typically a
+  VS Code extension bundling an older engine, or a long-lived `vg serve`)
+  could bind *its* older vgd first, and the update reported "Restarted the vgd
+  daemon on the new version" against that stale process; the very next
+  `vg update` then found a stale daemon again. Every background daemon start
+  now checks the build on the socket after it answers ping, force-retires an
+  older squatter and retries (bounded), and reports honestly when an old
+  client keeps winning. On Windows the update also starts the daemon back up
+  itself after having stopped it to free its files, instead of leaving the
+  socket free for an older client to claim.
+- **No more stray Node console windows on Windows** — children spawned by
+  console-less processes (the vgd daemon's embedding worker and background
+  rebuilds, plus the git/ripgrep/npm probes they run) each popped a visible
+  blank `node.exe`/console window on the desktop; closing one killed the
+  embedding worker with `STATUS_CONTROL_C_EXIT` (exit code 3221225786) and
+  took semantic search down with it. All background child processes are now
+  spawned with hidden consoles (`windowsHide`), and the daemon itself gets a
+  windowless console its whole subtree inherits.
+- **A failed semantic index heals itself** — a slot whose build died (for
+  example the killed embedding worker above) stayed `failed` forever with
+  `vg daemon status` repeating the same error, because nothing ever retried
+  it. The daemon now schedules a bounded automatic rebuild while it still has
+  crash budget, so one external kill no longer permanently degrades semantic
+  search to lexical.
+- **A plan limit no longer blocks the scan itself** — a limit reported by scan
+  preflight (repository cap, scan credits, VM minutes) used to abort before the
+  scan ran, so a workspace at its repository cap could not use `vg` at all. The
+  limit only gates ingestion, so it now only gates the push: the CLI warns with
+  the server's reason and the upgrade link, disables the upload, runs the full
+  local scan, and repeats the warning after the results so it isn't lost in the
+  output. `--strict` keeps the previous hard failure for CI. Removing the
+  mid-run exit on this path also fixes a Windows libuv abort seen when exiting
+  with the progress UI's handles still open.
 
 ## [Initial public release] - 2026-06-25
 

@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { buildGraph } from './build.js';
+import { mergeExcludes } from './discover.js';
 import { probeFreshness, writeSnapshot, hasDrift, type Drift } from './freshness.js';
 import { writeArtifacts, vibgrateDir } from './artifacts.js';
 import { acquireLock, releaseLock } from './lock.js';
@@ -28,6 +29,22 @@ export interface RefreshOptions {
   inline?: boolean;
   /** Worker count for the parse pool. */
   jobs?: number;
+  /**
+   * The map path already resolved by the caller (e.g. `vg serve`'s startup
+   * resolution). Passed straight through to `writeArtifacts` so a refresh
+   * never re-resolves it: `defaultGraphPath` shells out to `git rev-parse`
+   * (Fusion §4.1.1 branch keying), and re-running that on every drift-driven
+   * refresh put a synchronous git spawn back on the hot tool-call path this
+   * function exists to keep off of. Omit only when no caller-known path
+   * exists (falls back to a fresh `defaultGraphPath` resolution).
+   */
+  graphPath?: string;
+  /**
+   * Live progress during the parse phase. A refresh is silent by default —
+   * callers own their surface — but `vg review`'s auto-prep needs to show a
+   * bar, because there the rebuild is the thing the user is waiting on.
+   */
+  onParseProgress?: (done: number, total: number) => void;
 }
 
 export type RefreshOutcome =
@@ -63,10 +80,11 @@ export async function refreshIfStale(root: string, opts: RefreshOptions = {}): P
   const start = process.hrtime.bigint();
   try {
     const { scope } = probe;
+    const exclude = mergeExcludes(root, scope.exclude);
     const result = await buildGraph({
       root,
       only: scope.only,
-      exclude: scope.exclude,
+      exclude,
       paths: scope.paths,
       deep: scope.deep,
       noGround: scope.noGround,
@@ -77,6 +95,7 @@ export async function refreshIfStale(root: string, opts: RefreshOptions = {}): P
       grammarsDir: scope.grammarsDir,
       inline: opts.inline,
       jobs: opts.jobs,
+      onParseProgress: opts.onParseProgress,
     });
 
     const wrote = result.graph.provenance.corpusHash !== probe.corpusHash;
@@ -84,11 +103,12 @@ export async function refreshIfStale(root: string, opts: RefreshOptions = {}): P
       const dir = vibgrateDir(root);
       writeArtifacts(result.graph, {
         root,
+        graphPath: opts.graphPath,
         report: fs.existsSync(path.join(dir, 'GRAPH_REPORT.md')),
         html: fs.existsSync(path.join(dir, 'graph.html')),
       });
     }
-    writeSnapshot(root, result.graph.provenance.corpusHash, result.fileStats, scope);
+    writeSnapshot(root, result.graph.provenance.corpusHash, result.fileStats, { ...scope, exclude });
 
     const ms = Number((process.hrtime.bigint() - start) / 1000000n);
     return {

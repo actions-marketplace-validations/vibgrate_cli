@@ -18,11 +18,15 @@ export interface ModuleResolver {
   resolve(fromRel: string, source: string): string | null;
 }
 
-const JS_TS_EXT = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
+// Container SFC formats (.vue/.svelte/.astro) resolve as part of the JS/TS
+// group: their script region is JS/TS, they import ts/js modules, and ts/js
+// files import them back (`import Foo from './Foo.vue'`).
+const JS_TS_EXT = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.vue', '.svelte', '.astro'];
 const OTHER_EXT = [
   '.py', '.pyi', '.go', '.rs', '.rb', '.java', '.cs',
   '.php', '.kt', '.kts', '.swift', '.scala', '.sc', '.dart', '.lua',
   '.ex', '.exs', '.sh', '.bash', '.zig', '.c', '.cpp', '.cc', '.cxx', '.hpp', '.hh', '.hxx', '.h',
+  '.m', '.mm', '.ml', '.mli', '.res', '.sol',
 ];
 
 // Which target extensions a dotted import from a given file may resolve to.
@@ -61,6 +65,18 @@ Object.assign(EXT_GROUPS, {
   '.hh': CPP_EXT,
   '.hxx': CPP_EXT,
   '.h': [...CPP_EXT, '.c'],
+  // ObjC #imports headers; ObjC++ additionally reaches C++ headers.
+  '.m': ['.h', '.m', '.mm'],
+  '.mm': ['.h', '.m', '.mm', ...CPP_EXT],
+  '.ml': ['.ml', '.mli'],
+  '.mli': ['.ml', '.mli'],
+  '.res': ['.res'],
+  '.sol': ['.sol'],
+  // Template containers: ERB fragments are Ruby; HTML/EJS script is JS.
+  '.erb': ['.rb', '.erb'],
+  '.html': JS_TS_EXT,
+  '.htm': JS_TS_EXT,
+  '.ejs': JS_TS_EXT,
 });
 
 export function buildModuleResolver(root: string, relSet: Set<string>): ModuleResolver {
@@ -262,11 +278,25 @@ export function relativeResolver(relSet: Set<string>): ModuleResolver {
 
 // --- probing ---
 
+/** ESM-in-TS specifiers name the EMITTED file (`./x.js` for `x.ts`); map the
+ * JS extension back to the source extensions TS itself would try. */
+const ESM_EMITTED: Record<string, string[]> = {
+  '.js': ['.ts', '.tsx'],
+  '.jsx': ['.tsx'],
+  '.mjs': ['.mts'],
+  '.cjs': ['.cts'],
+};
+
 function makeProbe(relSet: Set<string>): (base: string) => string | null {
   return (base: string) => {
     const norm = normalizeRel(base);
     if (!norm) return null;
     if (relSet.has(norm)) return norm;
+    const emittedExt = Object.keys(ESM_EMITTED).find((e) => norm.endsWith(e));
+    if (emittedExt) {
+      const stem = norm.slice(0, -emittedExt.length);
+      for (const ext of ESM_EMITTED[emittedExt]) if (relSet.has(stem + ext)) return stem + ext;
+    }
     for (const ext of JS_TS_EXT) if (relSet.has(norm + ext)) return norm + ext;
     for (const ext of JS_TS_EXT) if (relSet.has(`${norm}/index${ext}`)) return `${norm}/index${ext}`;
     for (const ext of OTHER_EXT) if (relSet.has(norm + ext)) return norm + ext;

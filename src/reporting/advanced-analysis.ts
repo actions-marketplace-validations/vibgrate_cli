@@ -5,7 +5,12 @@ import type {
   ProjectScan,
   ArchitectureResult,
 } from '../core-open/index.js';
-import { compactUiPurpose } from '../core-open/index.js';
+import {
+  compactUiPurpose,
+  scanArchitectureBundle,
+  mermaidFromArchitecture,
+  aggregateSolutionArchitecture,
+} from '../core-open/index.js';
 
 import { scanPlatformMatrix } from './scanners/platform-matrix.js';
 import { scanDependencyRisk } from './scanners/dependency-risk.js';
@@ -17,13 +22,8 @@ import { scanBreakingChangeExposure } from './scanners/breaking-change.js';
 import { scanFileHotspots } from './scanners/file-hotspots.js';
 import { scanSecurityPosture } from './scanners/security-posture.js';
 import { scanServiceDependencies } from './scanners/service-dependencies.js';
-import {
-  scanArchitecture,
-  buildProjectArchitectureMermaid,
-  scanProjectArchitecture,
-  aggregateSolutionArchitecture,
-} from './scanners/architecture.js';
 import { scanCodeQuality } from './scanners/code-quality.js';
+import { scanDatabaseSchema } from './scanners/database-schema.js';
 import { scanUiPurpose } from './scanners/ui-purpose.js';
 import { recommendStandards } from './scanners/standards-mapper.js';
 
@@ -44,6 +44,17 @@ import { recommendStandards } from './scanners/standards-mapper.js';
  * excluded: it regex-scraped whole source lines (auth hints, tokens, connection
  * strings, license text) into the artifact, a data-quality and secret-exposure
  * risk. Do not re-introduce raw-line `extract()` scanning here.
+ *
+ * The `databaseSchema` scanner follows the same discipline across all five of
+ * its sources (Prisma, raw SQL migrations, SQL Server Database Projects,
+ * Drizzle, TypeORM): it parses each into structured facts only — model/table
+ * names, field/column names, types, and relation/list/optional/id/unique
+ * flags, plus the Prisma datasource `provider` name. It never captures a
+ * Prisma datasource's `url` line (a connection string/credential), and the
+ * raw-SQL sources additionally strip any line that looks like a URL with
+ * embedded credentials before parsing — belt-and-suspenders, since SQL files
+ * don't normally contain these. No source captures any other raw source
+ * text. See `scanners/database-schema.ts` for the per-source detail.
  */
 export async function runAdvancedAnalysis(ctx: CoreScanContext): Promise<void> {
   const { rootDir, opts, scanners, maxPrivacyMode, allProjects, solutions, projectsByPath, fileCache, progress, extended } = ctx;
@@ -68,6 +79,7 @@ export async function runAdvancedAnalysis(ctx: CoreScanContext): Promise<void> {
     dependencyRisk: true,
     architecture: !maxPrivacyMode,
     codeQuality: !maxPrivacyMode,
+    databaseSchema: !maxPrivacyMode,
     uiPurpose: !maxPrivacyMode,
   } as const;
 
@@ -86,6 +98,7 @@ export async function runAdvancedAnalysis(ctx: CoreScanContext): Promise<void> {
     ...(scannerPolicy.dependencyRisk && scanners?.dependencyRisk?.enabled !== false ? [{ id: 'deprisk', label: 'Dependency risk' }] : []),
     ...(scannerPolicy.architecture && scanners?.architecture?.enabled !== false ? [{ id: 'architecture', label: 'Architecture layers' }] : []),
     ...(scannerPolicy.codeQuality && scanners?.codeQuality?.enabled !== false ? [{ id: 'codequality', label: 'Code quality metrics' }] : []),
+    ...(scannerPolicy.databaseSchema && scanners?.databaseSchema?.enabled !== false ? [{ id: 'databaseschema', label: 'Database schema' }] : []),
     ...((!maxPrivacyMode && (opts.uiPurpose || scanners?.uiPurpose?.enabled === true)) ? [{ id: 'uipurpose', label: 'UI purpose evidence' }] : []),
   ];
   for (const step of advancedSteps) {
@@ -225,6 +238,21 @@ export async function runAdvancedAnalysis(ctx: CoreScanContext): Promise<void> {
     );
   }
 
+  if (scannerPolicy.databaseSchema && scanners?.databaseSchema?.enabled !== false) {
+    progress.startStep('databaseschema');
+    scannerTasks.push(
+      scanDatabaseSchema(rootDir, allProjects, fileCache).then((result) => {
+        extended.databaseSchema = result;
+        const modelCount = result?.models.length ?? 0;
+        const enumCount = result?.enums.length ?? 0;
+        const dsParts: string[] = [];
+        if (modelCount > 0) dsParts.push(`${modelCount} model${modelCount !== 1 ? 's' : ''}`);
+        if (enumCount > 0) dsParts.push(`${enumCount} enum${enumCount !== 1 ? 's' : ''}`);
+        progress.completeStep('databaseschema', dsParts.join(', ') || 'none found', modelCount);
+      }),
+    );
+  }
+
   if (scannerPolicy.dependencyRisk && scanners?.dependencyRisk?.enabled !== false) {
     progress.startStep('deprisk');
     scannerTasks.push(
@@ -259,25 +287,23 @@ export async function runAdvancedAnalysis(ctx: CoreScanContext): Promise<void> {
 
   if (scannerPolicy.architecture && scanners?.architecture?.enabled !== false) {
     progress.startStep('architecture');
-    extended.architecture = await scanArchitecture(
+    const { workspace, projectResults } = await scanArchitectureBundle(
       rootDir,
       allProjects,
       extended.toolingInventory,
       extended.serviceDependencies,
       fileCache,
     );
+    extended.architecture = workspace;
     const arch = extended.architecture;
     const layerCount = arch.layers.filter((l) => l.fileCount > 0).length;
 
-    await Promise.all(allProjects.map(async (project) => {
-      project.architectureMermaid = await buildProjectArchitectureMermaid(
-        rootDir,
-        project,
-        arch.archetype,
-        fileCache,
-      );
-      project.architecture = await scanProjectArchitecture(rootDir, project, fileCache);
-    }));
+    for (let i = 0; i < allProjects.length; i++) {
+      const project = allProjects[i]!;
+      const projectArch = projectResults[i]!;
+      project.architecture = projectArch;
+      project.architectureMermaid = mermaidFromArchitecture(projectArch);
+    }
 
     for (const solution of solutions) {
       const memberProjects = solution.projectPaths
@@ -287,7 +313,7 @@ export async function runAdvancedAnalysis(ctx: CoreScanContext): Promise<void> {
         .map((p) => p.architecture)
         .filter((a): a is ArchitectureResult => Boolean(a));
       if (memberArchResults.length > 0) {
-        solution.architecture = aggregateSolutionArchitecture(memberArchResults);
+        solution.architecture = aggregateSolutionArchitecture(memberArchResults, memberProjects);
       }
     }
 
@@ -312,6 +338,7 @@ export async function runAdvancedAnalysis(ctx: CoreScanContext): Promise<void> {
     advancedFiles += extended.buildDeploy.ci.length;
   }
   if (extended.codeQuality) advancedFiles += extended.codeQuality.filesAnalyzed;
+  if (extended.databaseSchema) advancedFiles += extended.databaseSchema.filesScanned.length;
   if (extended.uiPurpose) advancedFiles += extended.uiPurpose.topEvidence.length;
   if (advancedFiles > 0) ctx.addFilesScanned(advancedFiles);
 }

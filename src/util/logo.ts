@@ -30,21 +30,47 @@ const ROBOT = [
  * self-contained block; the wordmark/tagline sit on their OWN lines beneath it
  * (never beside the variable-width glyphs), so the banner aligns in any terminal.
  */
-export function logoLines(root?: string): string[] {
+export function logoLines(root?: string, opts: { product?: string; tagline?: string } = {}): string[] {
+  const product = opts.product ?? 'Graph';
+  const tagline = opts.tagline ?? 'Code Intelligence Engine';
   return [
     '',
     `  ${ROBOT[0]}`,
     `  ${ROBOT[1]}`,
     `  ${ROBOT[2]}`,
     `  ${ROBOT[3]}`,
-    `  ${c.bold.white('Vibgrate')} ${teal('Graph')}  ${c.dim(`· Code Intelligence Engine · v${VERSION}`)}`,
+    `  ${c.bold.white('Vibgrate')} ${teal(product)}  ${c.dim(`· ${tagline} · v${VERSION}`)}`,
     ...(root ? [`  ${c.dim(root)}`] : []),
     '',
   ];
 }
 
 /** Print the banner to stderr, only for an interactive human (TTY). */
-export function printLogo(root?: string): void {
+export function printLogo(root?: string, opts: { product?: string; tagline?: string } = {}): void {
   if (!process.stderr.isTTY) return;
-  process.stderr.write(`${logoLines(root).join('\n')}\n`);
+  process.stderr.write(`${logoLines(root, opts).join('\n')}\n`);
+}
+
+/**
+ * The **VG Code** banner (the approved marketing name for the code-editing
+ * capability; see docs/NAMING-AND-MARKETING-STRATEGY.md). Same robot mark, but
+ * the wordmark reads "VG Code" rather than "Vibgrate Graph".
+ */
+export function codeLogoLines(root?: string): string[] {
+  return [
+    '',
+    `  ${ROBOT[0]}`,
+    `  ${ROBOT[1]}`,
+    `  ${ROBOT[2]}`,
+    `  ${ROBOT[3]}`,
+    `  ${c.bold.white('VG')} ${teal('Code')}  ${c.dim(`· graph-grounded coding · v${VERSION}`)}`,
+    ...(root ? [`  ${c.dim(root)}`] : []),
+    '',
+  ];
+}
+
+/** Print the VG Code banner to stderr, only for an interactive human (TTY). */
+export function printCodeLogo(root?: string): void {
+  if (!process.stderr.isTTY) return;
+  process.stderr.write(`${codeLogoLines(root).join('\n')}\n`);
 }

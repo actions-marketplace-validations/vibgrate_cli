@@ -21,8 +21,13 @@ const LEDGER = 'savings.jsonl';
 // A conservative, documented estimate: tokens an agent reads per file it opens.
 export const PER_FILE_TOKENS = 400;
 
-/** The tools whose grep/read token baseline the savings summary is computed from. */
-export const SAVINGS_TOOLS = new Set(['query_graph', 'get_node']);
+/** The tools whose grep/read token baseline the savings summary is computed from.
+ *  search_symbols belongs here: it is the direct grep replacement (the server
+ *  instructions steer agents to it INSTEAD of grep), yet it used to contribute
+ *  zero to the estimate — on search-heavy sessions most of the real saving went
+ *  uncounted. Its baseline is the same measure as query_graph's: the distinct
+ *  files its matches point at, at PER_FILE_TOKENS each. */
+export const SAVINGS_TOOLS = new Set(['query_graph', 'get_node', 'search_symbols']);
 
 /**
  * How a navigation call reached the map:
@@ -90,6 +95,31 @@ export interface SavingEntry {
   // sanitized coarse label (see sanitizeClient) or absent when unidentified.
   source?: Source;
   client?: string;
+  // The model that made the call, for per-model savings auditing. `provider` is
+  // a coarse provider label (e.g. `anthropic`, `ollama`), `model` the sanitized
+  // model slug. VG Code sets both so `vg savings` can break usage down per model.
+  // Absent on lines from callers that don't identify a model.
+  provider?: string;
+  model?: string;
+  // Wall time of the call, ms. Optional: absent on lines written before timing
+  // existed (and on CLI-sourced lines) — absent means "not measured", never 0.
+  ms?: number;
+}
+
+/**
+ * Normalise a model slug to a bounded, non-PII token — like {@link sanitizeClient}
+ * but keeping the `/` and `:` that model ids use (`anthropic/claude-3.5-sonnet`,
+ * `qwen2.5-coder:7b`). Returns undefined when nothing usable is given.
+ */
+export function sanitizeModelId(name: string | undefined | null): string | undefined {
+  if (typeof name !== 'string') return undefined;
+  const cleaned = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._:/-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60);
+  return cleaned || undefined;
 }
 
 /**
@@ -100,7 +130,7 @@ export interface SavingEntry {
  */
 export function recordCliCall(
   root: string,
-  entry: { tool: string; client?: string; outcome: Outcome; vgTokens?: number; baselineFiles?: number },
+  entry: { tool: string; client?: string; provider?: string; model?: string; outcome: Outcome; vgTokens?: number; baselineFiles?: number },
   now: number,
 ): void {
   recordSaving(
@@ -109,6 +139,8 @@ export function recordCliCall(
       tool: entry.tool,
       source: 'cli',
       client: sanitizeClient(entry.client),
+      provider: entry.provider ? sanitizeClient(entry.provider) : undefined,
+      model: sanitizeModelId(entry.model),
       outcome: entry.outcome,
       vgTokens: entry.vgTokens ?? 0,
       baselineTokens: (entry.baselineFiles ?? 0) * PER_FILE_TOKENS,
@@ -117,13 +149,38 @@ export function recordCliCall(
   );
 }
 
-function ledgerPath(root: string): string {
+/**
+ * Absolute path of the local usage ledger for this repo. Exported so the serve
+ * status display can tail it live (mcp/ledger-tail.ts) — the file itself stays
+ * local-only (GUARDRAILS §3.4; upload is the separate opt-in stats-share path).
+ */
+export function savingsLedgerPath(root: string): string {
   return path.join(cacheDir(root), LEDGER);
+}
+
+function ledgerPath(root: string): string {
+  return savingsLedgerPath(root);
 }
 
 /** Whether a savings ledger exists for this repo (i.e. `vg serve --savings` has recorded). */
 export function savingsRecorded(root: string): boolean {
   return fs.existsSync(ledgerPath(root));
+}
+
+/**
+ * Delete the recorded usage data for this repo: the ledger itself plus the
+ * stats-share state that indexes into it (a byte offset into the ledger and the
+ * random per-install id) — a stale offset against a fresh ledger would silently
+ * skip new entries, and clearing "my data" should also reset the id. Everything
+ * removed lives under `.vibgrate/cache/`; nothing else is touched. Returns
+ * whether a ledger existed.
+ */
+export function clearSavings(root: string): boolean {
+  const file = ledgerPath(root);
+  const existed = fs.existsSync(file);
+  fs.rmSync(file, { force: true });
+  fs.rmSync(path.join(cacheDir(root), 'stats-share.json'), { force: true });
+  return existed;
 }
 
 export function recordSaving(root: string, entry: Omit<SavingEntry, 'ts'>, now: number): void {
@@ -197,6 +254,59 @@ function round2(x: number): number {
   return Math.round(x * 100) / 100;
 }
 
+/** Token + cost savings attributed to one model (VG Code per-model auditing). */
+export interface ModelSaving {
+  /** `provider/model`, the ledger's per-model key. */
+  key: string;
+  provider: string;
+  model: string;
+  queries: number;
+  vgTokens: number;
+  baselineTokens: number;
+  saved: number;
+}
+
+/**
+ * Per-model breakdown of the token-savings figures — the basis of "full savings
+ * auditing per model". Only entries that carry a `model` and are savings-baseline
+ * tools contribute, so it lines up with the headline `readSavings` totals.
+ * Sorted by dollars saved (desc), then key.
+ */
+export function readModelSavings(root: string, days: number, now: number, ratePerM = DEFAULT_RATE_PER_M): ModelSaving[] {
+  const file = ledgerPath(root);
+  const cutoff = now - days * 24 * 60 * 60 * 1000;
+  const byModel = new Map<string, { provider: string; model: string; queries: number; vg: number; base: number }>();
+  if (fs.existsSync(file)) {
+    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const e = JSON.parse(line) as SavingEntry;
+        if (e.ts < cutoff || !e.model || !SAVINGS_TOOLS.has(e.tool)) continue;
+        const provider = e.provider ?? 'unknown';
+        const key = `${provider}/${e.model}`;
+        const row = byModel.get(key) ?? { provider, model: e.model, queries: 0, vg: 0, base: 0 };
+        row.queries++;
+        row.vg += e.vgTokens;
+        row.base += e.baselineTokens;
+        byModel.set(key, row);
+      } catch {
+        /* skip corrupt line */
+      }
+    }
+  }
+  return [...byModel.entries()]
+    .map(([key, r]) => ({
+      key,
+      provider: r.provider,
+      model: r.model,
+      queries: r.queries,
+      vgTokens: r.vg,
+      baselineTokens: r.base,
+      saved: round2(((r.base - r.vg) / 1e6) * ratePerM),
+    }))
+    .sort((a, b) => b.saved - a.saved || a.key.localeCompare(b.key));
+}
+
 /** Per-command usage stats over the ledger window (all recorded tools). */
 export interface CommandStat {
   tool: string;
@@ -206,6 +316,8 @@ export interface CommandStat {
   miss: number;
   /** (complete + partial) / calls, as a whole-number percentage. */
   successPct: number;
+  /** Mean wall time over the calls that recorded one; null when none did. */
+  avgMs: number | null;
 }
 
 /** Calls attributed to one dimension value (a source, or a client). */
@@ -268,6 +380,9 @@ export function readUsage(root: string, days: number, now: number): UsageReport 
   const byTool = new Map<string, OutcomeCounts>();
   const bySource = new Map<string, OutcomeCounts>();
   const byClient = new Map<string, OutcomeCounts>();
+  // Per-tool timing over the entries that recorded a duration (older ledger
+  // lines and CLI-sourced calls carry none — "not measured", never zero).
+  const msByTool = new Map<string, { sum: number; n: number }>();
   const bump = (m: Map<string, OutcomeCounts>, key: string, outcome: Outcome): void => {
     const row = m.get(key) ?? { complete: 0, partial: 0, miss: 0 };
     row[outcome]++;
@@ -285,19 +400,29 @@ export function readUsage(root: string, days: number, now: number): UsageReport 
         bump(byTool, e.tool, outcome);
         bump(bySource, e.source ?? 'mcp', outcome);
         bump(byClient, e.client ?? 'unknown', outcome);
+        if (typeof e.ms === 'number' && e.ms >= 0) {
+          const timing = msByTool.get(e.tool) ?? { sum: 0, n: 0 };
+          timing.sum += e.ms;
+          timing.n++;
+          msByTool.set(e.tool, timing);
+        }
       } catch {
         /* skip corrupt line */
       }
     }
   }
-  const commands: CommandStat[] = toDimensionStats(byTool).map((d) => ({
-    tool: d.key,
-    calls: d.calls,
-    complete: d.complete,
-    partial: d.partial,
-    miss: d.miss,
-    successPct: d.successPct,
-  }));
+  const commands: CommandStat[] = toDimensionStats(byTool).map((d) => {
+    const timing = msByTool.get(d.key);
+    return {
+      tool: d.key,
+      calls: d.calls,
+      complete: d.complete,
+      partial: d.partial,
+      miss: d.miss,
+      successPct: d.successPct,
+      avgMs: timing && timing.n > 0 ? Math.round(timing.sum / timing.n) : null,
+    };
+  });
   const totals = commands.reduce(
     (t, c) => ({
       calls: t.calls + c.calls,

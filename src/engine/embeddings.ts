@@ -1,20 +1,28 @@
 import * as fs from 'node:fs';
+import { createRequire } from 'node:module';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { hashString } from './hash.js';
 import { cacheDir } from './cache.js';
-import { acquireLock, releaseLock } from './lock.js';
+import { resolveGraphPath } from './artifacts.js';
+import { acquireLock, lockHeld, releaseLock } from './lock.js';
 import type { GraphNode, VgGraph } from '../schema.js';
 
 /**
  * Local-embedding semantic search for `vg ask --semantic`/`--deep` (no API key).
  *
- * The embedding backend is an OPTIONAL, lazily-loaded dependency (`fastembed`,
- * Apache-2.0, local ONNX) so the core install stays lean and `ask` never breaks:
+ * The embedding backend is OPTIONAL and lazily loaded (the vendored
+ * `src/vendor/fastembed` dense backend over `onnxruntime-node`, local ONNX)
+ * so the core install stays lean and `ask` never breaks:
  * if the backend or model isn't available it degrades to (prefix-fuzzy) lexical
- * search with a clear note. Embeddings are query-time + cached under
- * `.vibgrate/cache/` (keyed by node-text hash); they are NEVER written into the
- * committed `graph.json`, so the artifact stays byte-deterministic.
+ * search with a clear note. Per-repo vectors live in a binary `*.embeddings`
+ * file **alongside the code map** (global store under Application Support /
+ * XDG data, or `.vibgrate/embeddings` in-repo) — never model-named, never under
+ * `.vibgrate/cache/`, and NEVER inside the committed `graph.json`, so the map
+ * stays byte-deterministic. The model id is recorded inside the file header so
+ * a model change still invalidates the cache without putting the name in the
+ * path.
  *
  * `--local` disables the model download (semantic is skipped unless already
  * cached via an injected backend), keeping the air-gapped guarantee.
@@ -37,7 +45,12 @@ export interface LoadEmbedderOptions {
   model?: string; // override the embedding model id
   noDownload?: boolean; // only load if the model is already cached (never fetch)
   showDownloadProgress?: boolean; // let fastembed print its one-time download progress
-  onUnavailable?: (reason: EmbedUnavailable) => void; // called (not thrown) when it can't load
+  /**
+   * Called (not thrown) when the backend can't load. `detail` carries the
+   * underlying loader error when there is one, so a host can log something
+   * actionable instead of a bare category.
+   */
+  onUnavailable?: (reason: EmbedUnavailable, detail?: string) => void;
 }
 
 /** The embedding model id in effect (explicit override → default). */
@@ -146,9 +159,37 @@ function isPermissionError(e: unknown): boolean {
  * Whether this repo already has a cached vector set for `modelId` — i.e. semantic
  * search has run here before, so the next run is fast (no first-use download/embed).
  * Lets `ask` show the one-time setup note only when it's actually warranted.
+ * Checks the binary sidecar next to the map (and the legacy JSON path once).
  */
 export function embeddingsCached(root: string, modelId: string): boolean {
-  return fs.existsSync(path.join(cacheDir(root), `embeddings-${safe(modelId)}.json`));
+  const file = vectorCachePath(root);
+  if (fs.existsSync(file) && readCacheHeader(file)?.model === modelId) return true;
+  // One-shot legacy: pre-binary caches lived under `.vibgrate/cache/embeddings-<model>.json`.
+  return fs.existsSync(legacyVectorCachePath(root, modelId));
+}
+
+/**
+ * Path of the binary embeddings file for this repo's current map — always named
+ * `embeddings` (or `<snapshot>.embeddings` next to a branch-keyed graph), never
+ * after the model. Exported for `vg embed --where` and tests.
+ */
+export function embeddingsPath(root: string): string {
+  return vectorCachePath(root);
+}
+
+/** Sidecar path next to a map file: `…/branch-main.graph.json` → `…/branch-main.embeddings`. */
+export function embeddingsPathFor(graphPath: string): string {
+  // Branch-keyed global maps: `…/graphs/branch-main.graph.json` → `…/graphs/branch-main.embeddings`.
+  if (graphPath.endsWith('.graph.json')) return `${graphPath.slice(0, -'.graph.json'.length)}.embeddings`;
+  if (graphPath.endsWith('.graph.snap')) return `${graphPath.slice(0, -'.graph.snap'.length)}.embeddings`;
+  // In-repo map is exactly `…/graph.json` (or `graph.snap`) → plain `…/embeddings`.
+  const base = path.basename(graphPath);
+  if (base === 'graph.json' || base === 'graph.snap') {
+    return path.join(path.dirname(graphPath), 'embeddings');
+  }
+  if (graphPath.endsWith('.json')) return `${graphPath.slice(0, -5)}.embeddings`;
+  if (graphPath.endsWith('.snap')) return `${graphPath.slice(0, -5)}.embeddings`;
+  return `${graphPath}.embeddings`;
 }
 
 /**
@@ -163,15 +204,16 @@ export async function loadEmbedder(options: LoadEmbedderOptions = {}): Promise<E
   const modelId = resolveEmbedModel(options.model);
   // noDownload (used by the background warm-up): never fetch — bail if not cached.
   if (options.noDownload && !isModelReady(modelId)) return null;
-  const fail = (reason: EmbedUnavailable): null => {
-    options.onUnavailable?.(reason);
+  const fail = (reason: EmbedUnavailable, detail?: string): null => {
+    options.onUnavailable?.(reason, detail);
     return null;
   };
 
   // Lazy, optional dependency (native ONNX): loaded only for `vg ask`/`embed`,
   // never by build/verify, so the graph artifact stays deterministic.
-  const mod: any = await import('fastembed' as string).catch(() => null);
-  if (!mod?.FlagEmbedding) return fail('not-installed');
+  const backend = await importEmbedBackend();
+  const mod: any = backend.mod;
+  if (!mod?.FlagEmbedding) return fail('not-installed', backend.error);
 
   const cache = modelCacheDir(); // central, shared across all repos
   try {
@@ -216,8 +258,79 @@ export async function loadEmbedder(options: LoadEmbedderOptions = {}): Promise<E
       },
     };
   } catch (e) {
-    return fail(isPermissionError(e) ? 'no-permission' : 'download-failed');
+    return fail(isPermissionError(e) ? 'no-permission' : 'download-failed', errText(e));
   }
+}
+
+/**
+ * Import the optional embedding backend — the VENDORED dense backend
+ * (src/vendor/fastembed). It still needs the optional native deps
+ * (`onnxruntime-node`, `@anush008/tokenizers`, `tar`), which a host can supply
+ * out-of-tree via `VIBGRATE_EMBEDDER_PATH` — a directory whose `node_modules`
+ * contains them. Editor integrations use this when their bundled engine ships
+ * without the native optional dependencies (the VS Code extension installs
+ * them into its own storage on consent); the host dir wins over this package's
+ * own dependency tree so the copies the user consented to are the ones that
+ * load (see `ensureNativeDeps` in the vendored module).
+ *
+ * Legacy host contract: a host dir holding a whole upstream `fastembed`
+ * install (what older extension versions set up) is still honored, and wins,
+ * so an engine upgrade never breaks a backend the user already consented to.
+ * Any resolution failure falls through — never throws.
+ */
+async function importEmbedBackend(): Promise<{ mod: any | null; error?: string }> {
+  const hostDir = process.env.VIBGRATE_EMBEDDER_PATH;
+  let error: string | undefined;
+  if (hostDir) {
+    try {
+      const req = createRequire(path.join(hostDir, 'package.json'));
+      let entry: string | null = null;
+      try {
+        entry = req.resolve('fastembed');
+      } catch {
+        // No upstream fastembed in the host dir — the normal state under the
+        // current contract (the host supplies only the native deps, resolved
+        // by the vendored backend below). Not an error worth reporting.
+      }
+      if (entry) {
+        const mod: any = await import(pathToFileURL(entry).href);
+        const resolved = unwrapBackend(mod);
+        if (resolved) return { mod: resolved };
+        error = `${hostDir}: fastembed loaded but exported no FlagEmbedding`;
+      }
+    } catch (e) {
+      // Keep the reason. A host-supplied backend that resolves but won't load
+      // (native binary built for another ABI, a half-extracted tree, a missing
+      // transitive dep) is indistinguishable from "never installed" once the
+      // error is dropped — and that is the one failure a user cannot act on.
+      error = `${hostDir}: ${errText(e)}`;
+    }
+  }
+  try {
+    const mod: any = await import('../vendor/fastembed/index.js');
+    const resolved = unwrapBackend(mod);
+    if (!resolved) return { mod: null, error: error ?? 'embed backend exported no FlagEmbedding' };
+    // Load the native deps now (host dir first — see the vendored module), so
+    // a missing or broken install surfaces here as "not-installed" with the
+    // real reason instead of failing later mid-init.
+    if (typeof resolved.ensureNativeDeps === 'function') await resolved.ensureNativeDeps();
+    return { mod: resolved };
+  } catch (e) {
+    return { mod: null, error: error ?? errText(e) };
+  }
+}
+
+/** A CJS entry imported over ESM may nest its exports one or two `default`s deep. */
+function unwrapBackend(mod: any): any | null {
+  for (const candidate of [mod, mod?.default, mod?.default?.default]) {
+    if (candidate?.FlagEmbedding) return candidate;
+  }
+  return null;
+}
+
+function errText(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e);
+  return msg.replace(/\s+/g, ' ').trim().slice(0, 300);
 }
 
 /** Ceiling for the one-time model fetch/init; override via VG_EMBED_TIMEOUT_MS. */
@@ -270,10 +383,40 @@ function pathContext(file: string): string {
  * strongest available signal — the node's **doc-comment / docstring** summary —
  * plus lightweight context already on the graph (file-path words, area label), so
  * a tersely-named symbol (`Table`, `NotificationJob`) a concept query can reach.
- * Only the short, truncated doc summary is used (captured at build time); no full
- * file bodies, so the graph artifact stays deterministic.
+ *
+ * `document` nodes (markdown, manifests, Docker, CI, OpenAPI, …) put the
+ * scrubbed body in `doc` — that body is the primary embed signal so `vg ask`
+ * can answer project-context questions, not only code symbols.
  */
 export function nodeEmbedText(node: GraphNode, areaLabel?: string): string {
+  if (node.kind === 'document') {
+    const category = (node.signature ?? 'document').replace(/^document:/, '');
+    // Category keywords help ops/config queries land on the right file type.
+    const categoryHints: Record<string, string> = {
+      manifest: 'package dependencies scripts install dependencies versions',
+      docker: 'dockerfile container image build runtime',
+      compose: 'docker-compose services containers networking volumes',
+      ci: 'continuous integration github actions workflow pipeline test build deploy',
+      'build-config': 'typescript tsconfig bundler vite webpack eslint prettier test',
+      'api-contract': 'openapi swagger graphql protobuf api schema endpoints',
+      'task-runner': 'makefile justfile tasks build test run commands',
+      workspace: 'monorepo workspace packages pnpm turbo nx',
+      infra: 'deploy infrastructure kubernetes kubernetes terraform helm kubernetes',
+      'env-example': 'environment variables configuration secrets template',
+      markdown: 'documentation readme guide',
+    };
+    const hint = categoryHints[category] ?? category;
+    return [
+      node.qualifiedName,
+      'document',
+      category,
+      hint,
+      pathContext(node.file),
+      (node.doc ?? '').slice(0, 5000),
+    ]
+      .filter(Boolean)
+      .join('\n');
+  }
   return [node.qualifiedName, node.kind, node.signature ?? '', node.doc ?? '', pathContext(node.file), areaLabel ?? '']
     .filter(Boolean)
     .join(' ');
@@ -306,8 +449,60 @@ const EMBED_CHUNK = 256;
 /** Min gap between incremental cache writes (ms) — caps IO on big repos. */
 const CACHE_WRITE_INTERVAL_MS = 1500;
 
-function vectorCachePath(root: string, modelId: string): string {
+/**
+ * Binary embeddings format (local cache next to the map, never committed):
+ *
+ *   MAGIC "VGEMB1\0" · u16 version · u16 modelLen · model utf8 ·
+ *   u32 dims · u32 count ·
+ *   for each entry: u16 idLen · id · u16 hashLen · hash ·
+ *   then contiguous Float32LE vectors [count × dims]
+ *
+ * Why binary: a medium map (~4k nodes × 384 dims) is ~6 MB of floats but was
+ * ~30 MB of JSON with full decimal text — slow to parse and noisy in source
+ * control if it ever landed under the repo. The filename is always
+ * `embeddings` / `<snapshot>.embeddings`; the model id lives only in the header.
+ */
+/** 8-byte little-endian-friendly magic (same width as graph `VGSNAP1\0`). */
+const EMB_MAGIC = Buffer.from('VGEMB01\0', 'latin1');
+const EMB_VERSION = 1;
+
+function vectorCachePath(root: string): string {
+  return embeddingsPathFor(resolveGraphPath(root));
+}
+
+/** Pre-binary path: `.vibgrate/cache/embeddings-<model>.json` (read once to migrate). */
+function legacyVectorCachePath(root: string, modelId: string): string {
   return path.join(cacheDir(root), `embeddings-${safe(modelId)}.json`);
+}
+
+/** One node's contribution to the semantic index: what is embedded, and its hash. */
+export interface EmbedTarget {
+  id: string;
+  text: string;
+  hash: string;
+}
+
+/**
+ * The nodes the semantic index covers, and the exact text embedded for each.
+ *
+ * This is the single definition of "what is in the index", shared by the
+ * on-disk cache (`vg embed`, `vg ask`) and vgd's in-memory slot index. They
+ * used to compute it separately — vgd embedded *every* node with a shorter
+ * text — so the two indexes described different things and vgd re-embedded
+ * work the disk cache had already done. Keep them on this one function.
+ */
+export function embedTargets(graph: VgGraph): EmbedTarget[] {
+  // Tolerant of a partial graph: vgd indexes whatever a client publishes, and
+  // an `areas`-less map is a valid (if unlabelled) one.
+  const areaLabel = new Map((graph.areas ?? []).map((a) => [a.id, a.label] as const));
+  const targets: EmbedTarget[] = [];
+  for (const n of graph.nodes ?? []) {
+    // file/external stay out of the index; document (docs/env examples) are in.
+    if (n.kind === 'file' || n.kind === 'external') continue;
+    const text = nodeEmbedText(n, areaLabel.get(n.area));
+    targets.push({ id: n.id, text, hash: hashString(text) });
+  }
+  return targets;
 }
 
 /**
@@ -316,27 +511,267 @@ function vectorCachePath(root: string, modelId: string): string {
  * command / background warm-up exit instantly when nothing changed.
  */
 export function countPending(graph: VgGraph, root: string, modelId: string): number {
-  const entries = readCacheEntries(vectorCachePath(root, modelId), modelId);
-  const areaLabel = new Map(graph.areas.map((a) => [a.id, a.label] as const));
+  const entries = loadCache(root, modelId).entries;
   let pending = 0;
-  for (const n of graph.nodes) {
-    if (n.kind === 'file' || n.kind === 'external') continue;
-    const h = hashString(nodeEmbedText(n, areaLabel.get(n.area)));
-    const cached = entries[n.id];
-    if (!cached || cached.hash !== h) pending++;
+  for (const t of embedTargets(graph)) {
+    const cached = entries[t.id];
+    if (!cached || cached.hash !== t.hash) pending++;
   }
   return pending;
 }
 
-function readCacheEntries(file: string, modelId: string): EmbedCache['entries'] {
-  if (!fs.existsSync(file)) return {};
-  try {
-    const loaded = JSON.parse(fs.readFileSync(file, 'utf8')) as EmbedCache;
-    if (loaded.model === modelId && loaded.entries) return loaded.entries;
-  } catch {
-    /* treat as empty */
+/** What a reader (vgd) finds in this repo's on-disk vector cache. */
+export interface CachedVectorRead {
+  model: string;
+  /** nodeId → vector, for every node whose cached hash still matches. */
+  vectors: Map<string, number[]>;
+  /** Targets the cache does not cover yet. */
+  pending: EmbedTarget[];
+  /** True while another process holds the cache's single-writer lock. */
+  writerBusy: boolean;
+}
+
+/**
+ * Read this repo's vector cache without loading the embedding backend.
+ *
+ * vgd warms its slot index from here first: on a repo `vg embed` has already
+ * warmed, a slot goes `ready` in milliseconds with no worker and no duplicated
+ * embedding. `writerBusy` reports the single-writer lock so vgd can stand down
+ * while the `vg build` warm-up child is mid-run instead of racing it.
+ */
+export function readCachedVectors(
+  graph: VgGraph,
+  root: string,
+  modelId = resolveEmbedModel(),
+): CachedVectorRead {
+  const entries = loadCache(root, modelId).entries;
+  const vectors = new Map<string, number[]>();
+  const pending: EmbedTarget[] = [];
+  for (const t of embedTargets(graph)) {
+    const cached = entries[t.id];
+    if (cached && cached.hash === t.hash && cached.vec.length > 0) vectors.set(t.id, cached.vec);
+    else pending.push(t);
   }
-  return {};
+  return { model: modelId, vectors, pending, writerBusy: lockHeld(`${vectorCachePath(root)}.lock`) };
+}
+
+function loadCache(root: string, modelId: string): EmbedCache {
+  const file = vectorCachePath(root);
+  const binary = readBinaryCache(file, modelId);
+  if (binary) return binary;
+
+  // Migrate legacy JSON if present (once) — keep working after upgrade without
+  // re-embedding the whole repo.
+  const legacy = legacyVectorCachePath(root, modelId);
+  if (fs.existsSync(legacy)) {
+    try {
+      const loaded = JSON.parse(fs.readFileSync(legacy, 'utf8')) as EmbedCache;
+      if (loaded.model === modelId && loaded.entries) {
+        return { model: modelId, entries: loaded.entries };
+      }
+    } catch {
+      /* treat as empty */
+    }
+  }
+  return { model: modelId, entries: {} };
+}
+
+interface EmbedHeader {
+  model: string;
+  dims: number;
+  count: number;
+}
+
+/** Cheap header-only peek (no vectors) for `embeddingsCached` / diagnostics. */
+function readCacheHeader(file: string): EmbedHeader | null {
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(file, 'r');
+    const prefix = Buffer.alloc(8 + 2 + 2 + 512); // magic + ver + modelLen + model (capped)
+    const n = fs.readSync(fd, prefix, 0, prefix.length, 0);
+    if (n < EMB_MAGIC.length + 4 || !prefix.subarray(0, EMB_MAGIC.length).equals(EMB_MAGIC)) return null;
+    let o = EMB_MAGIC.length;
+    const version = prefix.readUInt16LE(o);
+    o += 2;
+    if (version !== EMB_VERSION) return null;
+    const modelLen = prefix.readUInt16LE(o);
+    o += 2;
+    if (o + modelLen + 8 > n) {
+      // model spills past our prefix — re-read exactly
+      const full = Buffer.alloc(EMB_MAGIC.length + 2 + 2 + modelLen + 8);
+      fs.readSync(fd, full, 0, full.length, 0);
+      return parseHeaderPrefix(full);
+    }
+    return parseHeaderPrefix(prefix);
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) fs.closeSync(fd);
+  }
+}
+
+function parseHeaderPrefix(buf: Buffer): EmbedHeader | null {
+  try {
+    if (!buf.subarray(0, EMB_MAGIC.length).equals(EMB_MAGIC)) return null;
+    let o = EMB_MAGIC.length;
+    if (buf.readUInt16LE(o) !== EMB_VERSION) return null;
+    o += 2;
+    const modelLen = buf.readUInt16LE(o);
+    o += 2;
+    if (o + modelLen + 8 > buf.length) return null;
+    const model = buf.subarray(o, o + modelLen).toString('utf8');
+    o += modelLen;
+    const dims = buf.readUInt32LE(o);
+    o += 4;
+    const count = buf.readUInt32LE(o);
+    return { model, dims, count };
+  } catch {
+    return null;
+  }
+}
+
+function readBinaryCache(file: string, modelId: string): EmbedCache | null {
+  if (!fs.existsSync(file)) return null;
+  try {
+    const buf = fs.readFileSync(file);
+    if (buf.length < EMB_MAGIC.length + 4 || !buf.subarray(0, EMB_MAGIC.length).equals(EMB_MAGIC)) return null;
+    let o = EMB_MAGIC.length;
+    if (buf.readUInt16LE(o) !== EMB_VERSION) return null;
+    o += 2;
+    const modelLen = buf.readUInt16LE(o);
+    o += 2;
+    const model = buf.subarray(o, o + modelLen).toString('utf8');
+    o += modelLen;
+    if (model !== modelId) return null;
+    const dims = buf.readUInt32LE(o);
+    o += 4;
+    const count = buf.readUInt32LE(o);
+    o += 4;
+    if (dims === 0 || count === 0) return { model, entries: {} };
+
+    const ids: string[] = [];
+    const hashes: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const idLen = buf.readUInt16LE(o);
+      o += 2;
+      ids.push(buf.subarray(o, o + idLen).toString('utf8'));
+      o += idLen;
+      const hashLen = buf.readUInt16LE(o);
+      o += 2;
+      hashes.push(buf.subarray(o, o + hashLen).toString('utf8'));
+      o += hashLen;
+    }
+    const floatsNeeded = count * dims;
+    const bytesNeeded = floatsNeeded * 4;
+    if (o + bytesNeeded > buf.length) return null;
+    // Copy into a standalone ArrayBuffer so Float32Array views are safe after buf is GC'd.
+    const floatBuf = Buffer.from(buf.subarray(o, o + bytesNeeded));
+    const floats = new Float32Array(floatBuf.buffer, floatBuf.byteOffset, floatsNeeded);
+
+    const entries: EmbedCache['entries'] = {};
+    for (let i = 0; i < count; i++) {
+      const start = i * dims;
+      const vec = Array.from(floats.subarray(start, start + dims));
+      entries[ids[i]!] = { hash: hashes[i]!, vec };
+    }
+    return { model, entries };
+  } catch {
+    return null;
+  }
+}
+
+function writeBinaryCache(file: string, cache: EmbedCache): void {
+  const ids = Object.keys(cache.entries);
+  const count = ids.length;
+  let dims = 0;
+  for (const id of ids) {
+    const d = cache.entries[id]!.vec.length;
+    if (d > 0) {
+      dims = d;
+      break;
+    }
+  }
+  // Empty or all-zero-dim cache: still write a valid header so "cached" is true.
+  const modelBuf = Buffer.from(cache.model, 'utf8');
+  if (modelBuf.length > 0xffff) throw new Error('embed model id too long');
+
+  // Index size (ids + hashes)
+  let indexBytes = 0;
+  const idBufs: Buffer[] = [];
+  const hashBufs: Buffer[] = [];
+  for (const id of ids) {
+    const ib = Buffer.from(id, 'utf8');
+    const hb = Buffer.from(cache.entries[id]!.hash, 'utf8');
+    if (ib.length > 0xffff || hb.length > 0xffff) throw new Error('embed entry key too long');
+    idBufs.push(ib);
+    hashBufs.push(hb);
+    indexBytes += 2 + ib.length + 2 + hb.length;
+  }
+
+  const headerBytes = EMB_MAGIC.length + 2 + 2 + modelBuf.length + 4 + 4;
+  const vecBytes = count * dims * 4;
+  const out = Buffer.allocUnsafe(headerBytes + indexBytes + vecBytes);
+  let o = 0;
+  EMB_MAGIC.copy(out, o);
+  o += EMB_MAGIC.length;
+  out.writeUInt16LE(EMB_VERSION, o);
+  o += 2;
+  out.writeUInt16LE(modelBuf.length, o);
+  o += 2;
+  modelBuf.copy(out, o);
+  o += modelBuf.length;
+  out.writeUInt32LE(dims, o);
+  o += 4;
+  out.writeUInt32LE(count, o);
+  o += 4;
+
+  for (let i = 0; i < count; i++) {
+    const ib = idBufs[i]!;
+    const hb = hashBufs[i]!;
+    out.writeUInt16LE(ib.length, o);
+    o += 2;
+    ib.copy(out, o);
+    o += ib.length;
+    out.writeUInt16LE(hb.length, o);
+    o += 2;
+    hb.copy(out, o);
+    o += hb.length;
+  }
+
+  if (dims > 0 && count > 0) {
+    const floats = new Float32Array(count * dims);
+    for (let i = 0; i < count; i++) {
+      const vec = cache.entries[ids[i]!]!.vec;
+      const base = i * dims;
+      for (let d = 0; d < dims; d++) floats[base + d] = vec[d] ?? 0;
+    }
+    Buffer.from(floats.buffer, floats.byteOffset, floats.byteLength).copy(out, o);
+  }
+
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp.${process.pid}`;
+  fs.writeFileSync(tmp, out);
+  fs.renameSync(tmp, file);
+}
+
+/** Best-effort drop of the old model-named JSON caches under `.vibgrate/cache/`. */
+function purgeLegacyJsonCaches(root: string): void {
+  const dir = cacheDir(root);
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (/^embeddings-.+\.json$/.test(name) || /^embeddings-.+\.json\.lock$/.test(name)) {
+      try {
+        fs.rmSync(path.join(dir, name), { force: true });
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
 }
 
 // Single-writer lock (shared helper — see ./lock.ts) so a foreground `ask`
@@ -355,36 +790,24 @@ export async function getNodeEmbeddings(
   root: string,
   onProgress?: EmbedProgress,
 ): Promise<Map<string, number[]>> {
-  const file = vectorCachePath(root, embedder.id);
-  let cache: EmbedCache = { model: embedder.id, entries: {} };
-  if (fs.existsSync(file)) {
-    try {
-      const loaded = JSON.parse(fs.readFileSync(file, 'utf8')) as EmbedCache;
-      if (loaded.model === embedder.id && loaded.entries) cache = loaded;
-    } catch {
-      /* rebuild */
-    }
-  }
+  const file = vectorCachePath(root);
+  const cache = loadCache(root, embedder.id);
 
-  const areaLabel = new Map(graph.areas.map((a) => [a.id, a.label] as const));
-  const targets = graph.nodes.filter((n) => n.kind !== 'file' && n.kind !== 'external');
-  const toEmbed: { id: string; text: string; hash: string }[] = [];
+  // Includes document nodes (markdown/txt/env examples) so ask can retrieve docs.
+  const targets = embedTargets(graph);
+  const toEmbed: EmbedTarget[] = [];
   const vectors = new Map<string, number[]>();
-  for (const n of targets) {
-    const text = nodeEmbedText(n, areaLabel.get(n.area));
-    const h = hashString(text);
-    const cached = cache.entries[n.id];
-    if (cached && cached.hash === h) vectors.set(n.id, cached.vec);
-    else toEmbed.push({ id: n.id, text, hash: h });
+  for (const t of targets) {
+    const cached = cache.entries[t.id];
+    if (cached && cached.hash === t.hash) vectors.set(t.id, cached.vec);
+    else toEmbed.push(t);
   }
 
   // Atomic write (temp + rename) so a reader never sees a half-written cache.
   const persist = (): void => {
     try {
-      fs.mkdirSync(cacheDir(root), { recursive: true });
-      const tmp = `${file}.tmp.${process.pid}`;
-      fs.writeFileSync(tmp, JSON.stringify(cache));
-      fs.renameSync(tmp, file);
+      writeBinaryCache(file, cache);
+      purgeLegacyJsonCaches(root);
     } catch {
       /* cache write best-effort */
     }
@@ -415,12 +838,16 @@ export async function getNodeEmbeddings(
         }
       }
       // prune entries for nodes no longer present, then a final authoritative write
-      const live = new Set(targets.map((n) => n.id));
+      const live = new Set(targets.map((t) => t.id));
       for (const id of Object.keys(cache.entries)) if (!live.has(id)) delete cache.entries[id];
       persist();
     } finally {
       releaseLock(lock);
     }
+  } else if (!fs.existsSync(file) && Object.keys(cache.entries).length > 0) {
+    // Migrating from legacy JSON with a full hit set — rewrite as binary once
+    // so the next run never reads the old path again.
+    persist();
   }
 
   return vectors;

@@ -5,13 +5,16 @@ import {
   resolveEmbedModel,
   countPending,
   embeddingsCached,
+  embeddingsPath,
   modelCacheInfo,
   clearModelCache,
   unavailableMessage,
   type EmbedUnavailable,
 } from '../engine/embeddings.js';
+import { embedderHealth, clearEmbedderHealth } from '../engine/embed-health.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
 import { requireGraph, rootOf } from './util.js';
+import { publishGraphToVgd } from '../runtime/vgd/publish.js';
 import { c, info, json } from '../util/output.js';
 import { ProgressBar } from '../util/progress.js';
 
@@ -25,7 +28,9 @@ function mb(bytes: number): string {
  * `vg embed` — precompute the semantic index (node embeddings) so the next
  * `vg ask` is instant. The model is downloaded once per machine into a central,
  * home-folder cache (XDG `~/.cache/vibgrate/models`; no admin/sudo needed) shared
- * across all repos; per-repo vectors live in `.vibgrate/cache/`.
+ * across all repos. Per-repo vectors are a binary `embeddings` file next to the
+ * code map (global application store / in-repo `.vibgrate/`), not under
+ * `.vibgrate/cache/` and not named after the model.
  *
  * `--where` shows the cache location/size; `--clear` removes the model. The
  * hidden `--bg` flag warms silently and never downloads (the `vg build` warm-up).
@@ -55,29 +60,53 @@ export function registerEmbed(program: Command): void {
       const bg = opts.bg === true;
       const speak = !bg && !global.json;
 
-      if (global.local) {
-        if (speak) info(c.dim('vg embed · semantic is off (--local) — lexical search only'));
+      if (global.offline) {
+        if (global.json) json({ embedded: 0, model: modelId, semantic: false, reason: 'local' });
+        else if (speak) info(c.dim('vg embed · semantic is off (--local) — lexical search only'));
         return;
       }
       if (countPending(graph, root, modelId) === 0) {
-        if (global.json) json({ embedded: 0, pending: 0, upToDate: true, model: modelId });
+        await warmDaemonIndex(root, global.graph);
+        if (global.json) json({ embedded: 0, pending: 0, upToDate: true, model: modelId, semantic: true });
         else if (speak) info(`${c.cyan('vg embed')} · semantic index already up to date`);
         return;
       }
 
+      // Same guard as the LSP: a crashed native backend would take this
+      // process down too, which is what made the background warm-up exit by
+      // signal ("code null") on every retry instead of reporting anything.
+      const health = await embedderHealth();
+      if (health.status === 'crashed') {
+        if (global.json) json({ embedded: 0, model: modelId, semantic: false, reason: 'native-crash', signal: health.signal });
+        else if (speak) info(c.dim(`vg embed · ${health.message}`));
+        return;
+      }
+
       let reason: EmbedUnavailable | undefined;
+      let detail: string | undefined;
       const embedder = await loadEmbedder({
-        local: global.local,
+        local: global.offline,
         // Background warm-ups skip the download unless explicitly asked to fetch
         // (`--bg --download`, spawned by `vg build` so the model is ready by the
         // time `vg serve`/`vg ask` needs it).
         noDownload: bg && opts.download !== true,
         showDownloadProgress: !bg,
-        onUnavailable: (r) => (reason = r),
+        onUnavailable: (r, d) => {
+          reason = r;
+          detail = d;
+        },
       });
       if (!embedder) {
-        // Calm, specific fallback — never a stack trace. (bg stays silent.)
-        if (speak && reason) info(c.dim(`vg embed · ${unavailableMessage(reason)}`));
+        // Calm, specific fallback — never a stack trace. But never *silent*
+        // either: a warm-up that reports plain success while nothing was
+        // embedded is what makes a host say "semantic search ready" and then
+        // answer every question lexically. `--json` carries the reason so the
+        // host can repair (or say so honestly); `--bg` says one dim line.
+        if (global.json) {
+          json({ embedded: 0, model: modelId, semantic: false, reason: reason ?? 'init-failed', detail: detail ?? null });
+        } else if (reason) {
+          info(c.dim(`vg embed · ${unavailableMessage(reason)}${detail ? ` (${detail})` : ''}`));
+        }
         return;
       }
 
@@ -85,17 +114,39 @@ export function registerEmbed(program: Command): void {
       const bar = speak ? new ProgressBar(c.dim('embedding')) : undefined;
       await getNodeEmbeddings(graph, embedder, root, bar ? (d, t) => bar.update(d, t) : undefined);
       bar?.done();
-      if (global.json) json({ embedded: pending, model: modelId });
+      // The on-disk vectors are complete now. A running vgd seeds its slot
+      // index straight from them, so this is what turns `vg daemon status`
+      // from "0/1 index(es) ready" into a warm daemon — without either side
+      // embedding the same repo twice.
+      await warmDaemonIndex(root, global.graph);
+      if (global.json) json({ embedded: pending, model: modelId, semantic: true });
       else if (speak) info(`${c.green('✔')} vg embed · semantic index ready (~${pending} node(s) · model ${modelId})`);
     });
   applyGlobalOptions(cmd);
 }
 
+/**
+ * Tell a running vgd that this repo's vectors are on disk, so it can warm the
+ * matching graph slot's index from them. Best-effort: no daemon is a supported
+ * configuration, and `vg embed` must not fail because of one.
+ */
+async function warmDaemonIndex(root: string, graphPath?: string): Promise<void> {
+  await publishGraphToVgd(root, { graphPath, warmSemantic: true });
+}
+
 function showWhere(root: string, modelId: string, asJson?: boolean): void {
   const m = modelCacheInfo(modelId);
   const repoCached = embeddingsCached(root, modelId);
+  const repoPath = embeddingsPath(root);
   if (asJson) {
-    json({ model: modelId, cacheDir: m.dir, present: m.present, bytes: m.bytes, repoEmbeddings: repoCached });
+    json({
+      model: modelId,
+      cacheDir: m.dir,
+      present: m.present,
+      bytes: m.bytes,
+      repoEmbeddings: repoCached,
+      embeddingsPath: repoPath,
+    });
     return;
   }
   info(`${c.cyan('vg embed')} · model cache`);
@@ -103,13 +154,18 @@ function showWhere(root: string, modelId: string, asJson?: boolean): void {
   info(`  shared at ${m.dir}`);
   info(`            ${m.present ? c.green(`present · ~${mb(m.bytes)}`) : c.dim('not downloaded yet (fetched on first semantic ask)')}`);
   info(`  this repo ${repoCached ? c.green('embeddings cached') : c.dim('not embedded yet — run `vg embed`')}`);
-  info(c.dim('  no admin/sudo needed — the cache is in your home folder, shared across all repos.'));
+  info(`            ${c.dim(repoPath)}`);
+  info(c.dim('  no admin/sudo needed — the model cache is in your home folder, shared across all repos.'));
+  info(c.dim('  vectors sit next to the code map (binary `embeddings`), not under .vibgrate/cache/.'));
   info(c.dim('  turn off: run with --local · relocate: XDG_CACHE_HOME=<dir> · remove: vg embed --clear'));
 }
 
 function doClear(asJson?: boolean): void {
   const before = modelCacheInfo();
   const freed = clearModelCache();
+  // Forget any crash verdict too: `--clear` is what someone runs after fixing
+  // a broken install, and a sticky verdict would keep semantic off.
+  clearEmbedderHealth();
   if (asJson) {
     json({ removed: before.present, bytesFreed: freed, dir: before.dir });
     return;

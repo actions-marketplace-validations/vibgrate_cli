@@ -1,12 +1,21 @@
 import { Command } from 'commander';
 import { loadGraph } from '../engine/load.js';
-import { ASSISTANTS, assistantById, detectServeLaunch, installAssistant, uninstallAssistant, writeNavigationConfig } from '../install/registry.js';
+import {
+  ASSISTANTS,
+  SMALL_REPO_FILES,
+  assistantById,
+  detectAssistants,
+  detectServeLaunch,
+  installAssistant,
+  isAssistantInstalled,
+  uninstallAssistant,
+  writeNavigationConfig,
+} from '../install/registry.js';
 import { applyGlobalOptions, readGlobal } from '../cli-options.js';
+import { installClaudeHooks, uninstallClaudeHooks } from '../install/hooks.js';
 import { rootOf } from './util.js';
 import { CliError, ExitCode, usageError } from '../util/exit.js';
 import { c, info, json } from '../util/output.js';
-
-const SMALL_REPO_FILES = 150;
 
 /**
  * `vg install <tool…>` (VG-CLI-SPEC §3.7) — wire vg into AI assistants: a skill,
@@ -20,27 +29,67 @@ export function registerInstall(program: Command): void {
     .description('add vg to your AI assistant(s): skill + MCP + advisory nudge')
     .argument('[tools...]', `assistant ids: ${ASSISTANTS.map((a) => a.id).join(', ')}`)
     .option('--all', 'install for every supported assistant')
+    .option('--detect', 'detect assistants in use (repo footprint, home config, PATH) and install for those; with --list, only report what was detected')
     .option('--list', 'show the support matrix and exit')
     .option('--no-hook', 'skip the advisory nudge')
-    .action(function (this: Command, tools: string[], opts: { all?: boolean; list?: boolean; hook?: boolean }) {
+    .option('--hooks', 'also wire the PreToolUse enrichment hook (Claude Code): Grep/Glob calls get graph context via `vg hook pre-tool-use` (project .claude/settings.json; opt-in)')
+    .action(function (this: Command, tools: string[], opts: { all?: boolean; detect?: boolean; list?: boolean; hook?: boolean; hooks?: boolean }) {
       const global = readGlobal(this);
       const root = rootOf(global);
 
+      const detected = opts.detect ? detectAssistants(root) : [];
+
       if (opts.list) {
+        if (opts.detect) {
+          // Detection report only — nothing is written. This is what editor
+          // integrations poll before deciding to run an install.
+          if (global.json) {
+            json(detected.map((d) => ({ id: d.assistant.id, label: d.assistant.label, via: d.via, marker: d.marker })));
+          } else if (detected.length === 0) {
+            info(`${c.cyan('vg install')} · no AI assistants detected here`);
+          } else {
+            info(`${c.cyan('vg install')} · detected assistants`);
+            const pad = Math.max(...detected.map((d) => d.assistant.id.length)) + 2;
+            for (const d of detected) {
+              info(`  ${c.bold(d.assistant.id.padEnd(pad))} ${d.assistant.label}  ${c.dim(`via ${d.via}: ${d.marker}`)}`);
+            }
+          }
+          return;
+        }
         if (global.json) {
-          json(ASSISTANTS.map((a) => ({ id: a.id, label: a.label, mcp: !!a.mcp, skill: !!a.skill, nudge: !!a.nudge })));
+          json(
+            ASSISTANTS.map((a) => ({
+              id: a.id,
+              label: a.label,
+              mcp: !!a.mcp,
+              skill: !!a.skill,
+              nudge: !!a.nudge,
+              installed: isAssistantInstalled(a, root),
+            })),
+          );
         } else {
           info(`${c.cyan('vg install')} · supported assistants`);
           const pad = Math.max(...ASSISTANTS.map((a) => a.id.length)) + 2;
           for (const a of ASSISTANTS) {
-            info(`  ${c.bold(a.id.padEnd(pad))} ${a.label}  ${c.dim(`mcp:${a.mcp ? '✓' : '—'} skill:${a.skill ? '✓' : '—'} nudge:${a.nudge ? '✓' : '—'}`)}`);
+            const on = isAssistantInstalled(a, root) ? c.green('on') : c.dim('off');
+            info(
+              `  ${c.bold(a.id.padEnd(pad))} ${a.label}  ${on}  ${c.dim(`mcp:${a.mcp ? '✓' : '—'} skill:${a.skill ? '✓' : '—'} nudge:${a.nudge ? '✓' : '—'}`)}`,
+            );
           }
         }
         return;
       }
 
-      const targets = opts.all ? ASSISTANTS : tools.map(resolve);
-      if (targets.length === 0) throw usageError('name an assistant (e.g. `vg install claude`) or use --all / --list');
+      const targets = opts.all ? ASSISTANTS : opts.detect ? detected.map((d) => d.assistant) : tools.map(resolve);
+      if (targets.length === 0) {
+        if (opts.detect) {
+          // Detecting nothing is a clean no-op, not a usage mistake.
+          if (global.json) json({ root, detected: [], results: [] });
+          else info(`${c.cyan('vg install')} · no AI assistants detected here — name one (e.g. \`vg install claude\`) or use --all`);
+          return;
+        }
+        throw usageError('name an assistant (e.g. `vg install claude`) or use --all / --detect / --list');
+      }
 
       const graph = loadGraph(root, global.graph);
       const fileCount = graph ? graph.nodes.filter((n) => n.kind === 'file').length : 0;
@@ -61,6 +110,16 @@ export function registerInstall(program: Command): void {
       for (const r of results) {
         info(`${c.green('✔')} ${c.bold(r.id)} — wrote ${r.wrote.join(', ')}${r.skipped.length ? c.dim(` (skipped ${r.skipped.join(', ')})`) : ''}`);
       }
+      // Opt-in PreToolUse enrichment (Claude Code settings format only): the
+      // host's own Grep/Glob results arrive annotated with graph context.
+      if (opts.hooks && targets.some((a) => a.id === 'claude')) {
+        const vgBin = launch.command === 'npx' ? null : launch.command;
+        const hooksResult = vgBin
+          ? installClaudeHooks(root, vgBin)
+          : ({ file: '.claude/settings.json', status: 'skipped', note: 'vg is not installed on PATH — hooks need a fast binary (npm i -g @vibgrate/cli), rerun with --hooks after' } as const);
+        if (hooksResult.status === 'written') info(`${c.green('✔')} ${c.bold('hooks')} — wrote PreToolUse enrichment into ${hooksResult.file}`);
+        else if (hooksResult.note) info(`${c.yellow('!')} hooks — ${hooksResult.note}`);
+      }
       if (launch.note && results.some((r) => r.note)) info(`${c.yellow('!')} ${launch.note}`);
       if (smallRepo) info(c.dim(`  note: small repo (${fileCount} files) — nudge says searching is fine; vg is still used for impact/tests`));
       info(c.dim(`  wrote ${navConfig} — deferred-loading config for Claude-API agents (lower per-step token cost)`));
@@ -77,6 +136,12 @@ export function registerInstall(program: Command): void {
       const global = readGlobal(this);
       const root = rootOf(global);
       const results = tools.map(resolve).map((a) => ({ id: a.id, removed: uninstallAssistant(a, root, !!opts.purge) }));
+      // Uninstalling claude also removes the vg PreToolUse hook entries (ours
+      // only — everything else in settings.json is preserved verbatim).
+      if (tools.map(resolve).some((a) => a.id === 'claude')) {
+        const hooksResult = uninstallClaudeHooks(root);
+        if (hooksResult.status === 'written') results.find((r) => r.id === 'claude')?.removed.push(`${hooksResult.file} (vg hook entries)`);
+      }
       if (global.json) {
         json({ root, results });
         return;

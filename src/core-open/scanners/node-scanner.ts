@@ -23,6 +23,11 @@ import type {
   ProjectReference,
 } from '../types.js';
 
+const MS_PER_DAY = 86_400_000;
+/** A package whose latest release is older than this is "abandoned" (no pulse) —
+ *  driftscore-3.0 §2.1. ~24 months. */
+const ABANDONED_MAX_DAYS = 730;
+
 /** Well-known frameworks we detect and track */
 const KNOWN_FRAMEWORKS: Record<string, string> = {
   // ── Frontend ──
@@ -349,13 +354,25 @@ async function scanOnePackageJson(
   const resolved = await Promise.all(metaPromises);
 
   for (const { pkg, section, spec, meta } of resolved) {
-    // Prefer the lockfile's EXACT installed version (authoritative + works offline); otherwise fall
-    // back to the registry's best match for the declared range.
-    const lockedVersion = lockIndex?.resolve(pkg, spec) ?? null;
-    const registryResolved = meta.stableVersions.length > 0
+    // Latest stable release that still satisfies the declared range — the best
+    // version an install could bring in without editing the manifest.
+    const latestSatisfying = meta.stableVersions.length > 0
       ? semver.maxSatisfying(meta.stableVersions, spec) ?? null
       : null;
-    const resolvedVersion = (lockedVersion && semver.valid(lockedVersion)) ? lockedVersion : registryResolved;
+    // Prefer the lockfile's EXACT installed version (authoritative + works
+    // offline) — but only while it still satisfies the declared range. Once the
+    // user edits the spec past the lock (bumped package.json, not yet
+    // installed), the lock entry describes the OLD dependency; keeping it would
+    // freeze the reported drift until the next install. An unparseable range
+    // keeps the lock (satisfaction is undecidable, and the lock is still the
+    // installed truth).
+    const lockedVersion = lockIndex?.resolve(pkg, spec) ?? null;
+    const range = semver.validRange(spec);
+    const lockUsable =
+      !!lockedVersion &&
+      !!semver.valid(lockedVersion) &&
+      (!range || semver.satisfies(lockedVersion, range, { includePrerelease: true }));
+    const resolvedVersion = lockUsable ? lockedVersion : latestSatisfying;
 
     const latestStable = meta.latestStableOverall;
 
@@ -384,17 +401,32 @@ async function scanOnePackageJson(
     const ageDays = ageDaysBetween(resolvedVersion, latestStable, meta.releaseDates);
     const libyears = daysToLibyears(ageDays);
 
+    // Abandonment (driftscore-3.0 §6.1): the *latest* release itself is old — the
+    // package has stopped moving ("no pulse"), even if you're on that latest
+    // version. Uses the registry publish dates already fetched for libyears, so
+    // there is no extra request. Fires the abandoned floor (drift ≥ 50).
+    const latestIso = latestStable ? meta.releaseDates?.[latestStable] : undefined;
+    let abandoned = false;
+    if (latestIso) {
+      const publishedMs = Date.parse(latestIso);
+      if (!Number.isNaN(publishedMs)) {
+        abandoned = (Date.now() - publishedMs) / MS_PER_DAY > ABANDONED_MAX_DAYS;
+      }
+    }
+
     dependencies.push({
       package: pkg,
       section,
       currentSpec: spec,
       resolvedVersion,
       latestStable,
+      latestSatisfying,
       majorsBehind,
       drift,
       license: buildDependencyLicense(meta.license, 'registry'),
       ageDays,
       libyears,
+      ...(abandoned ? { abandoned: true } : {}),
     });
 
     // Detect known frameworks

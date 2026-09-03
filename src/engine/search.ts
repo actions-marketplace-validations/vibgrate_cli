@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { findNodes } from './lookup.js';
 import { scanCandidates } from './literal-scan.js';
+import { extractLiteralNeedles, residualForSymbolSearch } from './query.js';
 import type { GraphNode, VgGraph } from '../schema.js';
 
 /**
@@ -56,34 +57,128 @@ export interface SearchResult {
   hint?: string;
 }
 
-const IGNORE_DIRS = new Set(['.git', '.vibgrate', 'node_modules', 'dist', 'build', 'out', 'target', 'vendor', '__pycache__']);
+const IGNORE_DIRS = new Set([
+  '.git', '.claude', '.vibgrate', 'node_modules', 'dist', 'build', 'out', 'target', 'vendor', '__pycache__',
+  // .NET intermediate output and coverage reports: purely generated trees that a
+  // C#/coverage-heavy repo pays for on every literal sweep. `bin` is deliberately
+  // NOT here — plenty of repos keep real scripts in bin/ (rails, node CLIs), and
+  // completeness beats speed; the binary-extension skip below keeps a .NET bin/
+  // cheap anyway.
+  'obj', 'coverage',
+]);
 const MAX_FILES_SCANNED = 20_000;
 
+/**
+ * Extensions that are binary by construction — skipped at listing time so the
+ * scan never stats/reads megabytes of DLLs or images just to reject them on the
+ * NUL check. Applied identically to the Node walk and the rg parse so both
+ * listers see the same corpus. Content-level binary detection (the NUL check in
+ * literal-scan) still guards everything this list misses.
+ */
+const BINARY_EXTS = new Set([
+  '.dll', '.pdb', '.exe', '.so', '.dylib', '.a', '.lib', '.o', '.class', '.jar', '.wasm', '.node',
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.icns', '.bmp',
+  '.zip', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar',
+  '.woff', '.woff2', '.ttf', '.otf', '.eot',
+  '.mp3', '.mp4', '.mov', '.avi', '.pdf',
+]);
+
+function hasBinaryExt(rel: string): boolean {
+  return BINARY_EXTS.has(path.extname(rel).toLowerCase());
+}
+
+/** Repo-relative paths are always reported with forward slashes — matching the
+ *  graph's own file paths, so symbol-hit/text-hit dedup works on Windows too. */
+function toPosix(rel: string): string {
+  return path.sep === '\\' ? rel.replaceAll('\\', '/') : rel;
+}
+
 export async function searchSymbols(graph: VgGraph, root: string, query: string, limit: number): Promise<SearchResult> {
-  const q = query.trim();
+  let q = query.trim();
   if (!q) return { matches: [], moreAvailable: false, hint: 'query is required' };
 
-  // A query with internal whitespace can never name a single symbol
-  // (identifiers have no spaces), so it is almost always a literal-string sweep
-  // — "find every place that says X". Route it literal-first: the symbol pass on
-  // such a query only ever produces loose per-token matches (e.g. the `Say`
-  // components for the phrase "you say"), and letting those fill the budget
-  // starves the real string hits and pushes the caller back to grep — the exact
-  // failure the analysis caught. Single-name lookups (no whitespace — the hot
-  // path) keep the symbol-first behaviour below unchanged.
-  const isPhrase = /\s/.test(q);
+  // A query wrapped in matching quotes is an explicit "find this exact string"
+  // — the tool description tells agents a QUOTED phrase runs a complete literal
+  // sweep, but a quoted SINGLE identifier ("AddJwtBearer") has no whitespace,
+  // used to take the single-name path, and searched for the quote characters
+  // themselves: a guaranteed no-match that sent the agent straight back to grep
+  // (the field-report failure). Strip the quotes and honour the intent.
+  const quoted = /^(["'`])(.+)\1$/.exec(q);
+  if (quoted && quoted[2]!.trim()) q = quoted[2]!.trim();
+
+  // Embedded URL / quoted needles inside a natural-language ask
+  // ("https://dash…/signup does not exist find occurrences"). The literal
+  // sweep must search for the *needle*, not the whole sentence — otherwise
+  // extension.ts:955 (bare URL) is a complete miss while only test fixtures
+  // that paste the full ask match.
+  const embeddedNeedles = extractLiteralNeedles(q);
+  const scanNeedle =
+    embeddedNeedles.length === 0
+      ? q
+      : embeddedNeedles.length === 1 && embeddedNeedles[0] === q
+        ? q
+        : [...embeddedNeedles].sort((a, b) => b.length - a.length)[0]!;
+  // Symbol pass: residual framing only, and empty when residual is pure
+  // scaffolding ("where is …?") so we do not rank applyPlan.where etc.
+  const symbolQuery =
+    embeddedNeedles.length > 0 ? residualForSymbolSearch(q) : q;
+
+  // Literal-sweep routing. Shapes that can never name one graph symbol:
+  //  - internal whitespace ("find every place that says X");
+  //  - explicit quotes (stripped above — quoting IS the sweep signal);
+  //  - a URL (`https://…`) — host/path tokens are not identifiers; without this
+  //    branch a bare URL stayed symbol-first and never ran the literal sweep
+  //    (field report: find occurrences of https://dash…/signup);
+  //  - embedded URL/quote inside NL framing (scanNeedle ≠ full query);
+  //  - a slash path with no `:` and no glob chars ("opportunities/mine",
+  //    "api/users/mine") — a route/path STRING. Its tokens previously fell into
+  //    the per-token symbol union, where a single loose token ("mine") produced
+  //    a confidently-ranked, completely unrelated symbol instead of a clean
+  //    literal answer. (`:`-bearing non-URL queries stay symbol-first: file:line
+  //    and qualified names look like paths too; globs keep the glob tier.)
+  // Single-name lookups (the hot path) keep symbol-first behaviour unchanged.
+  const isUrl = /^https?:\/\//i.test(scanNeedle) || embeddedNeedles.some((n) => /^https?:\/\//i.test(n));
+  const isPhrase =
+    Boolean(quoted) ||
+    isUrl ||
+    embeddedNeedles.length > 0 ||
+    /\s/.test(q) ||
+    (/[/\\]/.test(q) && !q.includes(':') && !/[*?]/.test(q));
 
   // Pass 1 — graph name index (already ranked by importance).
-  let nodes = findNodes(graph, q).filter((n) => n.kind !== 'file');
-  // Multi-word fallthrough: an agent that types a phrase ("NewScan modal
-  // component", "dsn install command") gets nothing from the whole-string name
-  // index and nothing from the whole-string literal scan — a dead end. When the
-  // exact query finds no symbol AND the query is multiple words, union the
-  // per-token matches and rank by how many distinct query tokens each symbol
-  // covers (then importance).
-  if (nodes.length === 0) {
-    const tokens = queryTokens(q);
-    if (tokens.length >= 2) nodes = multiTokenNodes(graph, tokens);
+  let nodes: GraphNode[] = [];
+  if (symbolQuery.trim()) {
+    nodes = findNodes(graph, symbolQuery).filter((n) => n.kind !== 'file');
+    // File-path tier: a query that IS a repo path ("src/services/OrderService.ts")
+    // used to dead-end — the name index only knows the file NODE (filtered out as
+    // uninteresting) and the literal scan only finds the path where it appears as
+    // text. The useful answer is the symbols DEFINED in that file, ranked.
+    if (nodes.length === 0) {
+      nodes = fileSymbolNodes(graph, symbolQuery);
+    }
+    // Reconstructed-identifier fallthrough: a humanized/spaced query ("get id",
+    // "use team", "f 0304") is frequently a *single* identifier whose original
+    // separators (camelCase boundary, `_`) were lost in humanization, not a
+    // multi-word phrase. Try the two mechanical rejoins — concatenated (recovers
+    // camelCase: "get id" -> "getid" == "getId") and underscore-joined (recovers
+    // snake_case: "f 0304" -> "f_0304") — against the exact/case-insensitive name
+    // index before falling through to the noisy per-token substring union below,
+    // which has no way to re-associate short tokens back into one identifier and
+    // silently drops single-character tokens ("f") that carry real information
+    // (VG-LOCATE-FAILURE-ANALYSIS.md).
+    if (nodes.length === 0 && isPhrase) {
+      nodes = reconstructedIdentifierNodes(graph, symbolQuery);
+    }
+    // Multi-word fallthrough: an agent that types a phrase ("NewScan modal
+    // component", "dsn install command") gets nothing from the whole-string name
+    // index and nothing from the whole-string literal scan — a dead end. When the
+    // exact query finds no symbol AND the query is multiple words, union the
+    // per-token matches and rank by how many distinct query tokens each symbol
+    // covers (then importance).
+    if (nodes.length === 0) {
+      const tokens = queryTokens(symbolQuery);
+      if (tokens.length >= 2) nodes = multiTokenNodes(graph, tokens);
+    }
   }
   // For a phrase, cap the symbol section to a fraction of the budget so it can
   // never crowd out the literal scan; the string hits lead, the loosely-matching
@@ -102,24 +197,38 @@ export async function searchSymbols(graph: VgGraph, root: string, query: string,
   // the budget the symbol cap freed up and a full count of what's out there
   // (`countAll`), so the caller can trust it for a complete sweep. A single name
   // only falls through on spare budget and stops at the budget, as before.
+  // Scan `scanNeedle` (extracted URL/quote when present), not the full NL ask.
   const spare = limit - symbolHits.length;
   const textHits: TextHit[] = [];
   let truncatedScan = false;
   let totalTextMatches: number | undefined;
-  if (spare > 0) {
+  // A single name the graph resolved EXACTLY (id / name / qualified name /
+  // file:line) doesn't fall through to the literal scan at all: the symbol
+  // answer is authoritative for "where is X defined", and padding it with text
+  // occurrences meant every perfect lookup still paid a worst-case full-tree
+  // sweep (the 16s-per-call trace on a large repo). Occurrence sweeps stay one
+  // explicit call away (quote it / add whitespace, or use impact_of/get_node
+  // callers for reference lists). Non-exact fallthroughs are unchanged.
+  const skipScan = !isPhrase && hasExactSymbolMatch(nodes, symbolQuery || q);
+  if (spare > 0 && !skipScan) {
     const seen = new Set(symbolHits.map((h) => `${h.file}:${h.line}`));
-    const scan = await scanFiles(root, q, spare, seen, textHits, isPhrase);
+    const scan = await scanFiles(root, scanNeedle, spare, seen, textHits, isPhrase);
     truncatedScan = scan.truncated;
     if (isPhrase) totalTextMatches = scan.total;
   }
 
-  const matches = [...symbolHits, ...textHits];
+  // Phrase/URL occurrence answers lead with text hits; symbols are secondary.
+  const matches = isPhrase ? [...textHits, ...symbolHits] : [...symbolHits, ...textHits];
   if (matches.length === 0) {
-    return {
+    const empty: SearchResult = {
       matches,
       moreAvailable: false,
       hint: 'no symbol or text match — for meaning-level questions (symptoms, relationships, what-breaks-if) use query_graph',
     };
+    // Phrase/URL sweeps still report totalTextMatches (including 0) so callers
+    // can tell a complete miss from a symbol-only empty without re-scanning.
+    if (totalTextMatches !== undefined) empty.totalTextMatches = totalTextMatches;
+    return empty;
   }
 
   const literalTruncated = totalTextMatches !== undefined && totalTextMatches > textHits.length;
@@ -134,9 +243,54 @@ export async function searchSymbols(graph: VgGraph, root: string, query: string,
   return result;
 }
 
+/**
+ * Symbols defined in the file the query names, ranked by importance — the
+ * file-path resolution tier. Accepts the exact repo-relative path (with or
+ * without a leading `./`, either separator style) or an unambiguous path
+ * suffix ("services/OrderService.ts"). Returns [] when the query names no file.
+ */
+function fileSymbolNodes(graph: VgGraph, q: string): GraphNode[] {
+  if (!/[/\\]/.test(q) && !/\.\w+$/.test(q)) return []; // cheap guard: not path-shaped
+  const norm = q.replaceAll('\\', '/').replace(/^\.\//, '');
+  const inFile = graph.nodes.filter(
+    (n) => n.kind !== 'file' && (n.file === norm || n.file.endsWith(`/${norm}`)),
+  );
+  return [...inFile].sort((a, b) => b.importance - a.importance || a.qualifiedName.localeCompare(b.qualifiedName));
+}
+
+/**
+ * Did the graph resolve `q` as an exact identifier (not a loose substring)?
+ * Mirrors findNodes' exact tiers: content-hash id, `file:line`, and whole-name /
+ * qualified-name equality (case-insensitive). Substring-tier matches return
+ * false so a partial name still gets the literal fallthrough.
+ */
+function hasExactSymbolMatch(nodes: GraphNode[], q: string): boolean {
+  if (nodes.length === 0) return false;
+  if (/^(.*):(\d+)$/.test(q)) return true; // resolved via the file:line tier
+  const lower = q.toLowerCase();
+  return nodes.some((n) => n.id === q || n.qualifiedName.toLowerCase() === lower || n.name.toLowerCase() === lower);
+}
+
 /** Meaningful query words for the multi-word fallthrough (drop tiny tokens). */
 function queryTokens(q: string): string[] {
   return [...new Set(q.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length >= 2))];
+}
+
+/**
+ * Rejoin a humanized query's words back into one identifier and look it up
+ * exactly. Humanization is lossy (both camelCase boundaries and `_`/`-`
+ * collapse to a plain space), so the original separator can't be recovered —
+ * try both mechanical rejoins and let `findNodes`'s case-insensitive exact
+ * match do the rest. Concatenated first (camelCase is the more common source
+ * convention across this engine's languages); underscore-joined second.
+ */
+function reconstructedIdentifierNodes(graph: VgGraph, q: string): GraphNode[] {
+  const words = q.trim().split(/\s+/).filter(Boolean);
+  if (words.length < 2) return [];
+  const concat = findNodes(graph, words.join(''));
+  if (concat.length) return concat.filter((n) => n.kind !== 'file');
+  const snake = findNodes(graph, words.join('_'));
+  return snake.filter((n) => n.kind !== 'file');
 }
 
 /**
@@ -144,19 +298,37 @@ function queryTokens(q: string): string[] {
  * tokens each symbol covers (then by importance). Reuses `findNodes` per token
  * so the matching rules (exact/short/case-insensitive/substring) stay identical
  * to a single-name lookup — this only broadens a phrase into its words.
+ *
+ * Noise guard: a symbol that only SUBSTRING-matched a single token is exactly
+ * the false-positive case — "opportunities/mine" surfacing an unrelated symbol
+ * through "mine" and presenting it as a confident answer when the honest
+ * result is "no match" (field report). Such nodes need ≥ 2 covered tokens to
+ * survive. A node whose NAME (or qualified name) equals a token outright is a
+ * strong signal on its own and always survives — "UserCard7 card panel" must
+ * keep UserCard7 even when the loose "card" token list is capped elsewhere.
  */
 function multiTokenNodes(graph: VgGraph, tokens: string[]): GraphNode[] {
-  const cov = new Map<string, { node: GraphNode; hits: number }>();
-  for (const t of tokens) {
-    for (const n of findNodes(graph, t)) {
-      if (n.kind === 'file') continue;
-      const e = cov.get(n.id);
-      if (e) e.hits++;
-      else cov.set(n.id, { node: n, hits: 1 });
+  // One uncapped pass over the graph, scoring every node against every token.
+  // (Delegating per-token to findNodes hit its 25-row substring cap: on a large
+  // graph a common token's list overflows, real targets lose that token's
+  // coverage, and the noise filter below would then discard them.)
+  const scored: Array<{ node: GraphNode; hits: number; exact: boolean }> = [];
+  for (const n of graph.nodes) {
+    if (n.kind === 'file') continue;
+    const name = n.name.toLowerCase();
+    const qn = n.qualifiedName.toLowerCase();
+    let hits = 0;
+    let exact = false;
+    for (const t of tokens) {
+      if (name === t || qn === t) {
+        hits++;
+        exact = true;
+      } else if (qn.includes(t)) hits++;
     }
+    if (exact || hits >= 2) scored.push({ node: n, hits, exact });
   }
-  return [...cov.values()]
-    .sort((a, b) => b.hits - a.hits || b.node.importance - a.node.importance)
+  return scored
+    .sort((a, b) => Number(b.exact) - Number(a.exact) || b.hits - a.hits || b.node.importance - a.node.importance || a.node.qualifiedName.localeCompare(b.node.qualifiedName))
     .map((e) => e.node);
 }
 
@@ -210,9 +382,44 @@ interface Listing {
   truncated: boolean;
 }
 
-/** rg-pruned candidates when available (fast), else the full Node walk. */
+/** rg-pruned candidates when available (fast), else the (cached) full Node walk. */
 function listCandidateFiles(root: string, needle: string): Listing {
-  return ripgrepCandidates(root, needle) ?? walkCandidates(root);
+  return ripgrepCandidates(root, needle) ?? walkCandidatesCached(root);
+}
+
+/**
+ * TTL cache for the Node-walk listing. The walk is needle-independent (it lists
+ * every scannable file), so a burst of search_symbols calls — the normal agent
+ * pattern is several lookups in one turn — was re-walking the whole tree each
+ * time. The TTL bounds staleness to the same few-second window the serve
+ * freshness probe already accepts (server.ts PROBE_INTERVAL_MS); file CONTENTS
+ * are always read live at scan time, so only a file created/deleted inside the
+ * window can be missed, and only from the listing. rg listings are per-needle
+ * and fast, so they bypass this cache entirely.
+ */
+const LISTING_TTL_MS = 2000;
+const listingCache = new Map<string, { listing: Listing; at: number }>();
+
+/** Drop all cached listings (tests, or after a known tree mutation). */
+export function clearListingCache(): void {
+  listingCache.clear();
+}
+
+/** TTL, overridable via VG_LISTING_TTL_MS (0 disables caching entirely). */
+function listingTtlMs(): number {
+  const v = Number(process.env.VG_LISTING_TTL_MS);
+  return Number.isFinite(v) && v >= 0 ? v : LISTING_TTL_MS;
+}
+
+function walkCandidatesCached(root: string): Listing {
+  const ttl = listingTtlMs();
+  if (ttl > 0) {
+    const hit = listingCache.get(root);
+    if (hit && Date.now() - hit.at < ttl) return hit.listing;
+  }
+  const listing = walkCandidates(root);
+  if (ttl > 0) listingCache.set(root, { listing, at: Date.now() });
+  return listing;
 }
 
 /** Every non-ignored, non-hidden file under root — the Node-native fallback. */
@@ -235,11 +442,12 @@ function walkCandidates(root: string): Listing {
         stack.push(abs);
         continue;
       }
+      if (hasBinaryExt(e.name)) continue;
       if (files.length >= MAX_FILES_SCANNED) {
         truncated = true;
         continue;
       }
-      files.push(path.relative(root, abs));
+      files.push(toPosix(path.relative(root, abs)));
     }
   }
   files.sort();
@@ -252,7 +460,7 @@ function hasRipgrep(): boolean {
   if (process.env.VG_DISABLE_RIPGREP) return false;
   if (rgAvailable === undefined) {
     try {
-      rgAvailable = spawnSync('rg', ['--version'], { stdio: 'ignore', timeout: 3000 }).status === 0;
+      rgAvailable = spawnSync('rg', ['--version'], { stdio: 'ignore', timeout: 3000, windowsHide: true }).status === 0;
     } catch {
       rgAvailable = false;
     }
@@ -273,21 +481,41 @@ function ripgrepCandidates(root: string, needle: string): Listing | null {
   const res = spawnSync(
     'rg',
     ['--files-with-matches', '--fixed-strings', '--ignore-case', '--no-ignore', '--no-messages', ...globs, '--', needle, '.'],
-    { cwd: root, encoding: 'utf8', timeout: 15_000, maxBuffer: 32 * 1024 * 1024 },
+    // windowsHide: rg runs from console-less hosts (vgd, editor-spawned
+    // servers) too — never flash a console window for it.
+    { cwd: root, encoding: 'utf8', timeout: 15_000, maxBuffer: 32 * 1024 * 1024, windowsHide: true },
   );
   // status 0 = matches, 1 = no matches (both fine); anything else / a spawn error
   // (signal kill on timeout, buffer overflow) is untrustworthy — fall back.
   if (res.error || (res.status !== 0 && res.status !== 1) || res.signal) return null;
-  const seen = new Set<string>();
-  for (const raw of res.stdout.split('\n')) {
-    const rel = raw.startsWith('./') ? raw.slice(2) : raw;
-    if (!rel) continue;
-    // Defensive: never trust a path that escaped the ignore/hidden rules.
-    const segs = rel.split('/');
-    if (segs.some((s) => s.startsWith('.') || IGNORE_DIRS.has(s))) continue;
-    seen.add(rel);
-  }
-  const files = [...seen].sort();
+  const files = parseRgFileList(res.stdout);
   if (files.length > MAX_FILES_SCANNED) return { files: files.slice(0, MAX_FILES_SCANNED), truncated: true };
   return { files, truncated: false };
+}
+
+/**
+ * Parse `rg --files-with-matches` stdout into clean, sorted, POSIX-relative
+ * paths. On Windows rg emits `.\src\Foo.cs` — before this was separator-aware,
+ * the whole backslash path read as ONE segment starting with `.`, so the
+ * defensive hidden-file filter below discarded every result and a Windows
+ * machine with rg installed silently lost all literal hits. Normalising to
+ * forward slashes first (matching the graph's own path style) makes the filter
+ * see real segments on every platform. Exported for tests; `sep` is injectable
+ * so Windows output can be simulated on any host.
+ */
+export function parseRgFileList(stdout: string, sep: string = path.sep): string[] {
+  const seen = new Set<string>();
+  for (const raw of stdout.split('\n')) {
+    if (!raw) continue;
+    const posix = sep === '\\' ? raw.replaceAll('\\', '/') : raw;
+    const rel = posix.startsWith('./') ? posix.slice(2) : posix;
+    if (!rel) continue;
+    // Defensive: never trust a path that escaped the ignore/hidden rules, and
+    // keep the corpus identical to the walk's (same binary-extension skip).
+    const segs = rel.split('/');
+    if (segs.some((s) => s.startsWith('.') || IGNORE_DIRS.has(s))) continue;
+    if (hasBinaryExt(rel)) continue;
+    seen.add(rel);
+  }
+  return [...seen].sort();
 }

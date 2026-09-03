@@ -320,6 +320,23 @@ export interface ScannerToggle {
   enabled: boolean;
 }
 
+/**
+ * Per-field override of the default upload-compaction caps for the
+ * `databaseSchema` scanner (see `compactDatabaseSchema` in
+ * `utils/compact-artifact.ts` and DOCS.md § Database Schema). Any field left
+ * unset keeps its built-in default. Raising these only affects how much of
+ * the *local* scan result survives compaction before upload — the ingest API
+ * enforces its own fixed hard ceiling on top, regardless of what's configured
+ * here, so a payload can never grow unbounded even from a misconfigured or
+ * non-CLI client.
+ */
+export interface DatabaseSchemaUploadCaps {
+  maxModels?: number;
+  maxFieldsPerModel?: number;
+  maxFilesPerModel?: number;
+  maxFilesScanned?: number;
+}
+
 export interface ScannersConfig {
   platformMatrix?: ScannerToggle;
   dependencyRisk?: ScannerToggle;
@@ -333,6 +350,7 @@ export interface ScannersConfig {
   serviceDependencies?: ScannerToggle;
   architecture?: ScannerToggle;
   codeQuality?: ScannerToggle;
+  databaseSchema?: ScannerToggle & DatabaseSchemaUploadCaps;
   uiPurpose?: ScannerToggle;
   runtimeConfiguration?: ScannerToggle;
   dataStores?: ScannerToggle;
@@ -556,6 +574,14 @@ export type ProjectArchetype =
   | 'library'
   | 'cli'
   | 'monorepo'
+  | 'spring'
+  | 'aspnet'
+  | 'django'
+  | 'fastapi'
+  | 'rails'
+  | 'laravel'
+  | 'phoenix'
+  | 'go-service'
   | 'unknown';
 
 /** Architectural layer classification */
@@ -571,6 +597,14 @@ export type ArchitectureLayer =
   | 'testing'
   | 'shared';
 
+export type ArchitectureFileRole =
+  | 'controller'
+  | 'service'
+  | 'repository'
+  | 'entity'
+  | 'handler'
+  | 'router';
+
 /** A single file classified into a layer */
 export interface LayerClassification {
   /** Relative path from project root */
@@ -580,6 +614,19 @@ export interface LayerClassification {
   /** Confidence of classification (0–1) */
   confidence: number;
   /** Top signals that contributed to classification */
+  signals: string[];
+  /** Confirmed syntactic role. Omit when the AST pass did not hit. */
+  role?: ArchitectureFileRole;
+  /** Which stage decided this layer. Feeds ArchitectureCoverage.bySource. */
+  source?: ArchitectureCoverageSource;
+}
+
+/** A directory labelled from its classified children, or inherited from an ancestor. */
+export interface FolderClassification {
+  path: string;
+  layer: ArchitectureLayer;
+  confidence: number;
+  fileCount: number;
   signals: string[];
 }
 
@@ -610,6 +657,35 @@ export interface LayerPackageRef {
   drift: 'current' | 'minor-behind' | 'major-behind' | 'unknown';
 }
 
+/** Workspace composition — not a project archetype. */
+export type WorkspaceShape = 'single' | 'monorepo' | 'polyglot-platform';
+
+/** Which stage of the pipeline decided a file's layer. */
+export type ArchitectureCoverageSource =
+  | 'path'
+  | 'suffix'
+  | 'pascal'
+  | 'folder-inherit'
+  | 'graph'
+  | 'ast'
+  | 'declared';
+
+/** Honest classification coverage. Mirrors core-open. */
+export interface ArchitectureCoverage {
+  classified: number;
+  unclassified: number;
+  /** classified / (classified + unclassified), 4 dp. 0 when nothing walked. */
+  ratio: number;
+  bySource: Record<ArchitectureCoverageSource, number>;
+}
+
+/** Unclassified source grouped by directory. Mirrors core-open. */
+export interface ArchitectureUnclassifiedFolder {
+  path: string;
+  count: number;
+  sampleFiles: string[];
+}
+
 /** Full architecture detection result */
 export interface ArchitectureResult {
   /** Detected project archetype */
@@ -622,6 +698,61 @@ export interface ArchitectureResult {
   totalClassified: number;
   /** Files that could not be classified */
   unclassified: number;
+  /** Directories labelled from classified children. Omit when none (absent ≠ []). */
+  folders?: FolderClassification[];
+  /** Sample of still-unclassified source paths, cap 40. Omit when none (absent ≠ []). */
+  unclassifiedFiles?: string[];
+  /** Classification coverage and attribution. Omit when no source was walked. */
+  coverage?: ArchitectureCoverage;
+  /** Unclassified source grouped by directory, cap 40. Omit when none (absent ≠ []). */
+  unclassifiedFolders?: ArchitectureUnclassifiedFolder[];
+  unclassifiedFoldersCapped?: true;
+  /** File-level classifications that carry a confirmed AST role. Cap 64. Omit when none. */
+  classified?: LayerClassification[];
+  /** Workspace composition. Omit on a per-project result. */
+  workspaceShape?: WorkspaceShape;
+  supportLevel?: 0 | 1 | 2 | 3 | 4;
+  packIds?: string[];
+  projectKind?: string;
+  artifactKind?: string;
+  contractKind?: string;
+  semanticRole?: string;
+  evidence?: Array<{
+    packId: string;
+    dimension: string;
+    value: string;
+    confidence: number;
+    signals: string[];
+  }>;
+  evidenceCapped?: true;
+  workspaceEdges?: Array<{
+    kind: 'implements-contract' | 'generates' | 'deploys' | 'provisions' | 'depends_on';
+    fromProject: string;
+    toProject: string;
+    fromFile?: string;
+    toFile?: string;
+    confidence: number;
+  }>;
+  workspaceEdgesCapped?: true;
+  violations?: Array<{
+    fromFile: string;
+    toFile: string;
+    fromLayer: ArchitectureLayer;
+    toLayer: ArchitectureLayer;
+    edgeKind: string;
+    rule: string;
+    confidence: number;
+  }>;
+  violationsCapped?: true;
+  boundaryProfile?: string;
+  structure?: {
+    primary: string;
+    characteristics: string[];
+    confidence: number;
+  };
+  generated?: true;
+  generatedBy?: string;
+  sourceContract?: string;
 }
 
 export interface GodFile {
@@ -640,6 +771,85 @@ export interface CodeQualityResult {
   godFiles: GodFile[];
   circularDependencies: number;
   deadCodePercent: number;
+}
+
+/**
+ * Which scanner produced a {@link DatabaseModel}. Models are never merged or
+ * deduped by name *across* sources — a `users` table found in a raw SQL
+ * migration and a `User` Prisma model are not assumed to be the same thing,
+ * even when their names coincide. Each source keeps its own dedup pass.
+ */
+export type DatabaseModelSource = 'prisma' | 'sql-migration' | 'sqlproj' | 'drizzle' | 'typeorm';
+
+/** A single field/column on a {@link DatabaseModel}. Never carries attribute
+ * *values* (e.g. Prisma's `@default(...)`, a SQL `DEFAULT ...` value, or a
+ * decorator's non-name arguments) — only structural facts. */
+export interface DatabaseField {
+  name: string;
+  /** Base type name/keyword as detected by the source parser, e.g. `String`,
+   *  `Post` (Prisma), `VARCHAR(255)` (SQL), `text` (Drizzle builder name), or
+   *  the declared TS type (TypeORM). Best-effort, never evaluated. */
+  type: string;
+  /** True when the field type is a list/array (or a `*ToMany` relation). */
+  isList: boolean;
+  /** True when the field type is optional/nullable. */
+  isOptional: boolean;
+  /** True when the type is another model/table, or an explicit relation
+   *  annotation/decorator/`REFERENCES` clause is present. */
+  isRelation: boolean;
+  /** True when the field is (part of) the primary key. */
+  isId: boolean;
+  /** True when the field carries a uniqueness constraint. */
+  isUnique: boolean;
+}
+
+/** A database model — a Prisma `model` block, a SQL `CREATE TABLE`, a Drizzle
+ * `pgTable`/`mysqlTable`/`sqliteTable` call, or a TypeORM `@Entity` class. */
+export interface DatabaseModel {
+  name: string;
+  fields: DatabaseField[];
+  /** Which scanner produced this model — see {@link DatabaseModelSource}. */
+  source: DatabaseModelSource;
+  /** File(s) (relative to rootDir) this model was extracted from. */
+  files: string[];
+}
+
+/** A Prisma `enum` block. */
+export interface DatabaseEnum {
+  name: string;
+  values: string[];
+}
+
+/** Per-project breakdown of database-schema files/models/enums, across all sources. */
+export interface DatabaseSchemaProjectSummary {
+  /** Project path (relative to rootDir), matching `ProjectScan.path`. */
+  project: string;
+  /** Schema/migration/entity files attributed to this project, relative to rootDir. */
+  filesScanned: string[];
+  /** Model names defined within this project's files (any source). */
+  models: string[];
+  /** Enum names defined within this project's files (Prisma only). */
+  enums: string[];
+}
+
+/**
+ * Structured, deterministic database-schema scan result, merged across all
+ * supported sources (Prisma, raw SQL migrations, SQL Server database
+ * projects, Drizzle, TypeORM). Only structural facts — model/table names,
+ * field/column names/types, relation/list/optional/id/unique flags, and enum
+ * names/values. Never a raw source line, connection string, or credential —
+ * see the doc comment at the top of `advanced-analysis.ts` and
+ * `scanners/database-schema.ts` for why.
+ */
+export interface DatabaseSchemaResult {
+  /** Datasource providers detected (e.g. `postgresql`, `mysql`, `sqlite`). Never includes the `url` value. */
+  providers: string[];
+  models: DatabaseModel[];
+  enums: DatabaseEnum[];
+  /** All schema/migration/entity files scanned (any source), relative to rootDir. */
+  filesScanned: string[];
+  /** Per-project breakdown. */
+  projects: DatabaseSchemaProjectSummary[];
 }
 
 export interface UiPurposeEvidenceItem {
@@ -830,6 +1040,7 @@ export interface ExtendedScanResults {
   serviceDependencies?: ServiceDependenciesResult;
   architecture?: ArchitectureResult;
   codeQuality?: CodeQualityResult;
+  databaseSchema?: DatabaseSchemaResult;
   uiPurpose?: UiPurposeResult;
   runtimeConfiguration?: RuntimeConfigurationResult;
   dataStores?: DataStoresResult;
